@@ -1,0 +1,33 @@
+# Vendored ImGui: no longer committed, CMakeLists.txt fetches it
+# automatically into this exact path if it's missing (see the imgui
+# section there). Delete it locally any time to force a re-fetch, or
+# leave it in place for fast rebuilds.
+/third_party/imgui/
+
+# Build output
+build/
+build_*/
+out/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+_deps/
+
+# Compiled binaries
+/Brazen
+/Brazen.exe
+/BrazenCoreTest
+/BrazenCoreTest.exe
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+*.swp
+
+# OS junk
+.DS_Store
+Thumbs.db

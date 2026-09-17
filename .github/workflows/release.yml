@@ -1,0 +1,59 @@
+name: Release
+
+# Builds and publishes a real, permanent GitHub Release whenever a
+# version tag (v1.0.0, v0.5.2-beta.1, etc) is pushed. Distinct from
+# rolling.yml's single reused "rolling" pre-release: every tag here gets
+# its own release that's never overwritten.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)publish a release for"
+        required: true
+        type: string
+
+permissions:
+  contents: write # needed to create the release
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.strip.outputs.version }}
+    steps:
+      # Workflow expression syntax has no built-in "strip prefix"
+      # function, so this is a real shell step rather than something
+      # inline in the `with:` block below.
+      - id: strip
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve-version
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.resolve-version.outputs.version }}
+
+  publish:
+    needs: [resolve-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish release
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          gh release create "$TAG" artifacts/*/* \
+            --title "Brazen Benchmarking $TAG" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,52 @@
+name: Rolling Release
+
+# Builds and republishes a single "rolling" pre-release on every push to
+# main, so there's always a downloadable build of the latest code
+# without needing to cut a real version tag. Uses `gh release`
+# (pre-installed on GitHub-hosted runners, maintained by GitHub itself)
+# rather than a third-party release action, so this workflow only
+# depends on tooling that's already part of the runner image.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {} # lets you re-run this manually from the Actions tab
+
+permissions:
+  contents: write # needed to create/update the rolling release and its tag
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      version: rolling-${{ github.run_number }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # `gh release create` fails if a release/tag with this name
+      # already exists, so the previous rolling release is deleted
+      # first (--cleanup-tag also removes the old "rolling" git tag,
+      # which then gets recreated pointing at the current commit).
+      - name: Replace previous rolling release
+        run: gh release delete rolling --yes --cleanup-tag || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish rolling release
+        run: |
+          gh release create rolling artifacts/*/* \
+            --title "Rolling Release" \
+            --notes "Automated build from commit ${{ github.sha }}. This is the latest code on main, not a stable/tested release -- see the version-tagged releases for those." \
+            --prerelease \
+            --target "${{ github.sha }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

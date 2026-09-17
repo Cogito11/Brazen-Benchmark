@@ -1,0 +1,85 @@
+name: Build
+
+# Reusable workflow: builds Brazen for Linux, Windows, and macOS and
+# uploads each as a workflow artifact. Called by rolling.yml (on every
+# push to main) and release.yml (on a version tag push) so the actual
+# build steps only need to be maintained in one place.
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version string baked into the binary (App Info screen) via -DBRAZEN_VERSION"
+        required: true
+        type: string
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: Brazen-linux-x86_64
+          - os: windows-latest
+            artifact_name: Brazen-windows-x86_64
+          - os: macos-latest
+            artifact_name: Brazen-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      # README's documented Ubuntu/Debian dependency line: system GLFW
+      # (so CMake's find_package(glfw3) picks it up directly, skipping
+      # the slower FetchContent-from-source fallback) plus the X11/
+      # OpenGL headers GLFW itself needs.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake libglfw3-dev libgl1-mesa-dev xorg-dev build-essential
+
+      # README's documented macOS dependency line.
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install ninja glfw
+
+      - name: Configure
+        shell: bash
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBRAZEN_VERSION="${{ inputs.version }}"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # Runs the headless console harness as a smoke test before
+      # packaging anything -- if the core benchmarking logic itself is
+      # broken, better to fail loudly here than ship a build of it.
+      - name: Smoke-test core logic (headless, no GPU/display needed)
+        shell: bash
+        run: |
+          if [ -f build/BrazenCoreTest ]; then ./build/BrazenCoreTest
+          else ./build/BrazenCoreTest.exe
+          fi
+
+      - name: Package (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd build
+          tar -czf "../${{ matrix.artifact_name }}.tar.gz" Brazen
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path build/Brazen.exe -DestinationPath "${{ matrix.artifact_name }}.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            ${{ matrix.artifact_name }}.tar.gz
+            ${{ matrix.artifact_name }}.zip
+          if-no-files-found: ignore
+          retention-days: 14
