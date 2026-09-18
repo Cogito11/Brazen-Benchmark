@@ -29,20 +29,29 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      # README's documented Ubuntu/Debian dependency line: system GLFW
-      # (so CMake's find_package(glfw3) picks it up directly, skipping
-      # the slower FetchContent-from-source fallback) plus the X11/
-      # OpenGL headers GLFW itself needs.
+      # Deliberately NOT installing libglfw3-dev here. This build's
+      # binaries get distributed to other people's machines, and if
+      # find_package(glfw3) succeeds it links against the *shared*
+      # system libglfw.so.3 -- which only exists on machines that
+      # happen to have that package installed, i.e. almost nobody's.
+      # Omitting it forces CMakeLists.txt's FetchContent fallback,
+      # which builds GLFW as a static library (its own CMake default)
+      # with no such runtime dependency. xorg-dev/libgl1-mesa-dev are
+      # still needed for GLFW to build its X11 backend from source.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build cmake libglfw3-dev libgl1-mesa-dev xorg-dev build-essential
+          sudo apt-get install -y ninja-build cmake libgl1-mesa-dev xorg-dev build-essential xvfb
 
-      # README's documented macOS dependency line.
+      # Same reasoning as the Linux dependencies above: not installing
+      # glfw via Homebrew, so the FetchContent fallback provides a
+      # statically-linked GLFW instead of one dynamically linked
+      # against a Homebrew-managed dylib that won't exist on a Mac
+      # without Homebrew (i.e. most of them).
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
-        run: brew install ninja glfw
+        run: brew install ninja
 
       - name: Configure
         shell: bash
@@ -50,6 +59,17 @@ jobs:
 
       - name: Build
         run: cmake --build build --parallel
+
+      # Prints exactly what got built, so "is this actually the GUI
+      # app" is answered directly in the CI log rather than requiring
+      # someone to download and inspect the artifact to find out.
+      - name: Inspect build output
+        shell: bash
+        run: |
+          BIN=build/Brazen
+          [ -f "$BIN" ] || BIN=build/Brazen.exe
+          ls -la "$BIN"
+          file "$BIN" || true
 
       # Runs the headless console harness as a smoke test before
       # packaging anything -- if the core benchmarking logic itself is
@@ -60,6 +80,30 @@ jobs:
           if [ -f build/BrazenCoreTest ]; then ./build/BrazenCoreTest
           else ./build/BrazenCoreTest.exe
           fi
+
+      # Actually launches the GUI binary itself (under a virtual X
+      # display, since CI has no real one) rather than just the console
+      # test above. This is the check that would have caught the
+      # dynamic-linking-against-a-package-that-won't-exist-on-the-
+      # user's-machine class of bug (see the dependency-install
+      # comments above) before it ever shipped: BrazenCoreTest never
+      # links GLFW at all, so it can't detect a broken Brazen binary.
+      - name: Smoke-test GUI launch (Linux, under Xvfb)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          Xvfb :99 -screen 0 1280x1024x24 &
+          export DISPLAY=:99
+          timeout 5 ./build/Brazen &
+          APP_PID=$!
+          sleep 2
+          if ! kill -0 $APP_PID 2>/dev/null; then
+            echo "Brazen exited within 2 seconds of launch -- treating as a smoke-test failure."
+            wait $APP_PID
+            exit 1
+          fi
+          echo "Brazen is still running after 2 seconds, looks healthy."
+          kill $APP_PID
 
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
