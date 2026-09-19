@@ -8,6 +8,7 @@
 
 #if defined(_WIN32)
     #include <io.h>
+    #include <fcntl.h>
 #elif defined(__linux__)
     #include <fcntl.h>
     #include <unistd.h>
@@ -89,8 +90,14 @@ public:
 
         std::random_device rd;
         char nameBuf[64];
-        std::snprintf(nameBuf, sizeof(nameBuf), "brazen_disktest_%08x_%08x.tmp", rd(), rd());
-        m_filePath = m_targetDir / nameBuf;
+        for (unsigned attempt = 0; attempt < 8; ++attempt) {
+            std::snprintf(nameBuf, sizeof(nameBuf), "brazen_disktest_%08x_%08x.tmp", rd(), rd());
+            m_filePath = m_targetDir / nameBuf;
+            std::error_code ec;
+            if (!std::filesystem::exists(m_filePath, ec) && !ec) break;
+            m_filePath.clear();
+        }
+        if (m_filePath.empty()) return;
 
         if (m_mode == DiskIoMode::Read) {
             // The read test needs something to read. Write it once,
@@ -100,31 +107,37 @@ public:
             // has clean, already-persisted pages to actually evict.
             // posix_fadvise can't drop pages that are still dirty.
             std::FILE* f = std::fopen(m_filePath.string().c_str(), "wb");
-            if (f) {
-                std::fwrite(m_buffer.data(), 1, m_buffer.size(), f);
-                std::fflush(f);
-                FlushToDevice(f);
-                std::fclose(f);
+            if (!f) return;
+            size_t written = std::fwrite(m_buffer.data(), 1, m_buffer.size(), f);
+            bool flushed = written == m_buffer.size() && std::fflush(f) == 0 && FlushToDevice(f);
+            bool closed = std::fclose(f) == 0;
+            if (!flushed || !closed || written != m_buffer.size()) {
+                std::error_code ec;
+                std::filesystem::remove(m_filePath, ec);
+                m_filePath.clear();
+                return;
             }
         }
+        m_setupSucceeded = true;
     }
 
     uint64_t RunWorkChunk() override {
+        if (!m_setupSucceeded) return 0;
+
         if (m_mode == DiskIoMode::Write) {
             std::FILE* f = std::fopen(m_filePath.string().c_str(), "wb");
             if (!f) return 0;
             size_t written = std::fwrite(m_buffer.data(), 1, m_buffer.size(), f);
-            std::fflush(f);       // userspace stdio buffer -> OS page cache
-            FlushToDevice(f);     // OS page cache -> physical device (the part a plain fflush() doesn't do)
-            std::fclose(f);
-            return static_cast<uint64_t>(written);
+            bool flushed = written == m_buffer.size() && std::fflush(f) == 0 && FlushToDevice(f);
+            bool closed = std::fclose(f) == 0;
+            return flushed && closed ? static_cast<uint64_t>(written) : 0;
         }
 
         DropFromPageCache();
         std::ifstream in(m_filePath, std::ios::binary);
         if (!in) return 0;
         in.read(reinterpret_cast<char*>(m_buffer.data()), static_cast<std::streamsize>(m_buffer.size()));
-        return static_cast<uint64_t>(m_chunkBytes);
+        return static_cast<uint64_t>(in.gcount());
     }
 
     double ComputeScore(uint64_t totalOps, double elapsedSeconds) const override {
@@ -143,15 +156,19 @@ public:
     // Run button.
     bool IsAvailable() const override {
         std::error_code ec;
-        if (m_targetDir.empty() || !std::filesystem::exists(m_targetDir, ec) || ec) return false;
-        std::filesystem::path probe = m_targetDir / ".brazen_write_probe.tmp";
-        bool ok;
-        {
-            std::ofstream test(probe, std::ios::binary);
-            ok = test.good();
+        if (m_targetDir.empty() || !std::filesystem::is_directory(m_targetDir, ec) || ec) return false;
+        std::random_device rd;
+        for (unsigned attempt = 0; attempt < 8; ++attempt) {
+            char nameBuf[64];
+            std::snprintf(nameBuf, sizeof(nameBuf), ".brazen_write_probe_%08x_%08x.tmp", rd(), rd());
+            std::filesystem::path probe = m_targetDir / nameBuf;
+            int fd = OpenExclusive(probe);
+            if (fd < 0) continue;
+            CloseProbe(fd);
+            std::filesystem::remove(probe, ec);
+            return !ec;
         }
-        std::filesystem::remove(probe, ec);
-        return ok;
+        return false;
     }
 
     ~DiskIoTest() override {
@@ -171,13 +188,29 @@ private:
     // happening before this existed: single-threaded Write was scoring
     // *faster* than Read, which is backwards for real storage hardware
     // and was the tell that writes weren't actually reaching the disk.
-    static void FlushToDevice(std::FILE* f) {
+    static bool FlushToDevice(std::FILE* f) {
 #if defined(_WIN32)
-        _commit(_fileno(f));
+        return _commit(_fileno(f)) == 0;
 #elif defined(__APPLE__)
-        fcntl(fileno(f), F_FULLFSYNC); // fsync() on macOS doesn't guarantee the drive's own write cache is flushed; F_FULLFSYNC does
+        return fcntl(fileno(f), F_FULLFSYNC) == 0; // fsync() on macOS doesn't guarantee the drive's own write cache is flushed; F_FULLFSYNC does
 #else
-        fsync(fileno(f));
+        return fsync(fileno(f)) == 0;
+#endif
+    }
+
+    static int OpenExclusive(const std::filesystem::path& path) {
+#if defined(_WIN32)
+        return _open(path.string().c_str(), _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY, _S_IREAD | _S_IWRITE);
+#else
+        return ::open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
+#endif
+    }
+
+    static void CloseProbe(int fd) {
+#if defined(_WIN32)
+        _close(fd);
+#else
+        ::close(fd);
 #endif
     }
 
@@ -202,6 +235,7 @@ private:
     std::filesystem::path m_filePath;
     DiskIoMode m_mode;
     size_t m_chunkBytes;
+    bool m_setupSucceeded = false;
     std::vector<unsigned char> m_buffer;
 };
 
