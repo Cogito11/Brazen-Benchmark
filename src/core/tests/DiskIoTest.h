@@ -9,6 +9,7 @@
 #if defined(_WIN32)
     #include <io.h>
     #include <fcntl.h>
+    #include <sys/stat.h>
 #elif defined(__linux__)
     #include <fcntl.h>
     #include <unistd.h>
