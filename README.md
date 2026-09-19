@@ -97,15 +97,20 @@ Run the GUI with `./Brazen` (or `build/Brazen.exe` on Windows).
 
 ### Setting the version string
 
-The version shown on the App Info screen is baked in at build time
-instead of hardcoded in source, using `-DBRAZEN_VERSION`:
+The local/development default is kept in
+[`cmake/BrazenVersion.cmake`](cmake/BrazenVersion.cmake). The version shown
+on the App Info screen is baked in at build time and can be overridden with
+`-DBRAZEN_VERSION`:
 
 ```bash
 cmake .. -DCMAKE_BUILD_TYPE=Release -DBRAZEN_VERSION=1.2.3
 ```
 
-If omitted, it falls back to `0.0.0-dev`. CI sets this automatically
-from the pushed git tag, see below.
+If omitted, CMake uses `BRAZEN_DEFAULT_VERSION` from the config file. CI
+overrides it automatically: stable releases use the pushed `vX.Y.Z` tag
+without the leading `v`, while rolling builds use an identifier such as
+`rolling-42`. This keeps local defaults easy to update without changing the
+stable-versus-rolling release behavior.
 
 ## Continuous integration and releases
 

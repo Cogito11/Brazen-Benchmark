@@ -4,17 +4,18 @@ project(Brazen CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+include(${CMAKE_SOURCE_DIR}/cmake/BrazenVersion.cmake)
+
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Version string baked into the binary (shown on the App Info screen)
-# via a preprocessor define -- see the target_compile_definitions line
-# on the Brazen target below. CI supplies this from the pushed git tag
-# (see .github/workflows/release.yml); local/dev builds fall back to
-# "0.0.0-dev" so the project still configures without it being set.
+# Version string baked into the binary (shown on the App Info screen).
+# The tracked default lives in cmake/BrazenVersion.cmake. CI can override it
+# with -DBRAZEN_VERSION: stable releases use the pushed tag, while rolling
+# builds use a rolling identifier.
 if(NOT DEFINED BRAZEN_VERSION)
-    set(BRAZEN_VERSION "0.0.0-dev")
+    set(BRAZEN_VERSION "${BRAZEN_DEFAULT_VERSION}")
 endif()
 
 find_package(OpenGL REQUIRED)
