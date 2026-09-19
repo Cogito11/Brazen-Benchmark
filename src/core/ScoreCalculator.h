@@ -13,15 +13,12 @@ struct CatRank {
 };
 
 // Ranks ordered weakest -> strongest. The points scale is Brazen's own
-// composite metric (see BaselineForTest below): 1000 points is single-
-// core performance matching an Intel Core i9-13900H, a real reference
-// machine rather than a guessed-at "average." The rank thresholds
-// themselves (where each tier starts) are still an illustrative curve
-// built around that anchor, not derived from a published benchmark
-// database. Treat the rank as a fun relative label, and adjust the
-// thresholds/baselines here further if you calibrate against more
-// known hardware.
-inline const std::vector<CatRank>& CatRankTable() {
+// composite metric (see BaselineForTest below). Single-core thresholds are
+// anchored around 1000 points for an Intel Core i9-13900H. Multi-core runs
+// deliberately use a wider curve because their aggregate throughput grows
+// with core count; applying single-core thresholds made ordinary multi-core
+// results jump straight to Cheetah.
+inline const std::vector<CatRank>& CatRankTable(RunMode mode = RunMode::SingleCore) {
     static const std::vector<CatRank> table = {
         {"Alley Cat", 0.0},
         {"House Cat", 300.0},
@@ -34,11 +31,23 @@ inline const std::vector<CatRank>& CatRankTable() {
         {"Lion",      5000.0},
         {"Cheetah",   7500.0},
     };
-    return table;
+    static const std::vector<CatRank> multiCoreTable = {
+        {"Alley Cat", 0.0},
+        {"House Cat", 1500.0},
+        {"Tabby",     3000.0},
+        {"Bobcat",    5000.0},
+        {"Lynx",      7000.0},
+        {"Cougar",    9500.0},
+        {"Panther",   12500.0},
+        {"Tiger",     15500.0},
+        {"Lion",      19000.0},
+        {"Cheetah",   24000.0},
+    };
+    return mode == RunMode::MultiCore ? multiCoreTable : table;
 }
 
-inline std::string RankForPoints(double points) {
-    const auto& table = CatRankTable();
+inline std::string RankForPoints(double points, RunMode mode = RunMode::SingleCore) {
+    const auto& table = CatRankTable(mode);
     std::string rank = table.front().name;
     for (const auto& r : table) {
         if (points >= r.minPoints) rank = r.name;
@@ -56,12 +65,11 @@ inline std::string RankForPoints(double points) {
 // Brazen's workloads are custom and wouldn't map cleanly onto one
 // anyway.
 //
-// Note: this baseline is only meaningfully "1000 points" for
-// Single-Core results. ComputeComposite() below applies the same
-// baseline to Multi-Core results too (it always has), so a Multi-Core
-// composite naturally lands well above 1000 purely from running on more
-// than one core. That reflects core count, not a separate multi-core
-// reference point.
+// Note: this baseline is only meaningfully "1000 points" for Single-Core
+// results. Multi-Core results intentionally use the same normalized points
+// scale, but RankForPoints() applies a separate wider rank curve so the rank
+// reflects aggregate throughput without treating every many-core result as
+// the highest tier.
 //
 // If you have another known machine to add as a second data point (or
 // want to recalibrate around different hardware), swap these five
@@ -89,7 +97,8 @@ struct CompositeScore {
 // result against BaselineForTest() and averaging the points across every
 // currently-available CPU test. Tests without a result yet simply don't
 // contribute, so the score fills in incrementally as tests complete.
-inline CompositeScore ComputeComposite(const std::map<std::string, BenchmarkResult>& latestResultsForMode) {
+inline CompositeScore ComputeComposite(const std::map<std::string, BenchmarkResult>& latestResultsForMode,
+                                       RunMode mode = RunMode::SingleCore) {
     auto& reg = TestRegistry::Instance();
     CompositeScore out;
     double sum = 0.0;
@@ -104,7 +113,7 @@ inline CompositeScore ComputeComposite(const std::map<std::string, BenchmarkResu
     }
     if (out.testsScored > 0) {
         out.points = sum / out.testsScored;
-        out.rank = RankForPoints(out.points);
+        out.rank = RankForPoints(out.points, mode);
     }
     out.complete = out.testsTotal > 0 && out.testsScored == out.testsTotal;
     return out;

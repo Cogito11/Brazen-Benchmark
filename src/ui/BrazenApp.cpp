@@ -771,15 +771,17 @@ void BrazenApp::DrawResultsView() {
             "illustrative estimates, not calibrated against real "
             "reference hardware. Treat the rank as a fun relative "
             "label, most meaningful when comparing this machine "
-            "against itself over time.");
+            "against itself over time. Single-Core and Multi-Core "
+            "use different rank thresholds: Multi-Core has a wider "
+            "curve because aggregate throughput rises with core count.");
     ImGui::SameLine();
     if (ImGui::SmallButton("View Rank Table"))
         ImGui::OpenPopup("Cat Rank Table##CatRankTable");
     DrawCatRankTablePopup();
     ImGui::Separator();
 
-    auto singleScore = ComputeComposite(m_latestSingleCore);
-    auto multiScore = ComputeComposite(m_latestMultiCore);
+    auto singleScore = ComputeComposite(m_latestSingleCore, RunMode::SingleCore);
+    auto multiScore = ComputeComposite(m_latestMultiCore, RunMode::MultiCore);
     ImGui::BeginChild("ScoreSingle", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f - 6.0f, ImGui::GetFontSize() * 4.2f), true);
     DrawScoreCard("Single-Core", singleScore);
     ImGui::EndChild();
@@ -921,7 +923,7 @@ void BrazenApp::DrawResultDetail(const BenchmarkResult& r, size_t index) {
     }
     if (isCpuTest && !r.cancelled) {
         double points = (r.score / BaselineForTest(r.testName)) * 1000.0;
-        std::string rank = RankForPoints(points);
+        std::string rank = RankForPoints(points, r.mode);
         ImGui::Text("Standalone cat rank:");
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.25f, 1.0f), "%s", rank.c_str());
@@ -965,18 +967,25 @@ void BrazenApp::DrawCatRankTablePopup() {
     if (ImGui::BeginPopupModal("Cat Rank Table##CatRankTable", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextWrapped(
             "Minimum composite points needed for each rank. See the '?' "
-            "next to Composite Score for how points are computed.");
+            "next to Composite Score for how points are computed. "
+            "Multi-Core uses a wider scale because aggregate throughput "
+            "increases with core count.");
         ImGui::Separator();
-        if (ImGui::BeginTable("CatRanksTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+        if (ImGui::BeginTable("CatRanksTable", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
             ImGui::TableSetupColumn("Rank");
-            ImGui::TableSetupColumn("Minimum Points");
+            ImGui::TableSetupColumn("Single-Core");
+            ImGui::TableSetupColumn("Multi-Core");
             ImGui::TableHeadersRow();
-            for (const auto& rank : CatRankTable()) {
+            const auto& singleRanks = CatRankTable(RunMode::SingleCore);
+            const auto& multiRanks = CatRankTable(RunMode::MultiCore);
+            for (size_t i = 0; i < singleRanks.size(); ++i) {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
-                ImGui::TextUnformatted(rank.name.c_str());
+                ImGui::TextUnformatted(singleRanks[i].name.c_str());
                 ImGui::TableSetColumnIndex(1);
-                ImGui::Text("%.0f", rank.minPoints);
+                ImGui::Text("%.0f", singleRanks[i].minPoints);
+                ImGui::TableSetColumnIndex(2);
+                ImGui::Text("%.0f", multiRanks[i].minPoints);
             }
             ImGui::EndTable();
         }
