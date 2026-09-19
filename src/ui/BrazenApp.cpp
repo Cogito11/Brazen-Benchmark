@@ -1146,10 +1146,12 @@ void BrazenApp::DrawSystemInfoView() {
         }
         ImGui::EndTable();
     }
-    ImGui::TextDisabled(
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::TextWrapped(
         "On Linux, drives are physical devices paired with a writable "
         "mounted partition; on Windows/macOS, each entry is a mounted "
         "volume/logical drive instead.");
+    ImGui::PopStyleColor();
 }
 
 // ---------------------------------------------------------------------
@@ -1205,9 +1207,13 @@ void BrazenApp::DrawAppInfoView() {
 
     ImGui::TextColored(ImVec4(0.5f, 0.7f, 1.0f, 1.0f), "Built With");
     ImGui::Separator();
-    ImGui::BulletText("Dear ImGui");
-    ImGui::BulletText("GLFW");
-    ImGui::BulletText("OpenGL 3.3 core profile");
+    ImGui::BulletText("Dear ImGui: desktop user interface");
+    ImGui::BulletText("GLFW: window creation and input");
+    ImGui::BulletText("OpenGL 3.3 core profile: GPU benchmark rendering");
+    ImGui::BulletText("C++17 standard library and platform APIs: benchmark and hardware access");
+    ImGui::TextWrapped(
+        "Dear ImGui and GLFW are third-party components. Their source and "
+        "license notices are included with the project distribution.");
 }
 
 // ---------------------------------------------------------------------
