@@ -17,6 +17,7 @@
 // OpenGL specification and don't vary by platform or vendor.
 
 #include <cstddef>
+#include <cstdint>
 
 #if defined(_WIN32)
     #define BRAZEN_GLAPI __stdcall
@@ -33,6 +34,7 @@ using GLbitfield = unsigned int;
 using GLint = int;
 using GLsizei = int;
 using GLuint = unsigned int;
+using GLuint64 = std::uint64_t;
 using GLfloat = float;
 using GLchar = char;
 using GLsizeiptr = ptrdiff_t;
@@ -63,6 +65,15 @@ constexpr GLenum GL_NO_ERROR_ = 0;
 constexpr GLenum GL_DEPTH_TEST_ = 0x0B71;
 constexpr GLenum GL_VENDOR_ = 0x1F00;
 constexpr GLenum GL_RENDERER_ = 0x1F01;
+constexpr GLenum GL_EXTENSIONS_ = 0x1F03;
+constexpr GLenum GL_NUM_EXTENSIONS_ = 0x821D;
+constexpr GLenum GL_TIME_ELAPSED_ = 0x88BF;
+constexpr GLenum GL_QUERY_RESULT_ = 0x8866;
+constexpr GLenum GL_TEXTURE0_ = 0x84C0;
+constexpr GLenum GL_TEXTURE_WRAP_S_ = 0x2802;
+constexpr GLenum GL_TEXTURE_WRAP_T_ = 0x2803;
+constexpr GLenum GL_CLAMP_TO_EDGE_ = 0x812F;
+constexpr GLenum GL_LINEAR_ = 0x2601;
 
 // ---- Function pointer typedefs (mirrors the real GL function signatures) ----
 using PFN_glGenVertexArrays = void(BRAZEN_GLAPI*)(GLsizei, GLuint*);
@@ -111,9 +122,17 @@ using PFN_glClearColor = void(BRAZEN_GLAPI*)(GLfloat, GLfloat, GLfloat, GLfloat)
 using PFN_glClear = void(BRAZEN_GLAPI*)(GLbitfield);
 using PFN_glDrawArrays = void(BRAZEN_GLAPI*)(GLenum, GLint, GLsizei);
 using PFN_glFinish = void(BRAZEN_GLAPI*)();
+using PFN_glGenQueries = void(BRAZEN_GLAPI*)(GLsizei, GLuint*);
+using PFN_glDeleteQueries = void(BRAZEN_GLAPI*)(GLsizei, const GLuint*);
+using PFN_glBeginQuery = void(BRAZEN_GLAPI*)(GLenum, GLuint);
+using PFN_glEndQuery = void(BRAZEN_GLAPI*)(GLenum);
+using PFN_glGetQueryObjectui64v = void(BRAZEN_GLAPI*)(GLuint, GLenum, GLuint64*);
+using PFN_glActiveTexture = void(BRAZEN_GLAPI*)(GLenum);
 using PFN_glGetError = GLenum(BRAZEN_GLAPI*)();
 using PFN_glDisable = void(BRAZEN_GLAPI*)(GLenum);
 using PFN_glGetString = const unsigned char*(BRAZEN_GLAPI*)(GLenum);
+using PFN_glGetStringi = const unsigned char*(BRAZEN_GLAPI*)(GLenum, GLuint);
+using PFN_glGetIntegerv = void(BRAZEN_GLAPI*)(GLenum, GLint*);
 
 // Global function pointers, populated by LoadGLFunctions(). Left null
 // until then; callers must check GLLoaderReady() before use.
@@ -164,9 +183,17 @@ struct GLFunctions {
     PFN_glClear Clear = nullptr;
     PFN_glDrawArrays DrawArrays = nullptr;
     PFN_glFinish Finish = nullptr;
+    PFN_glGenQueries GenQueries = nullptr;
+    PFN_glDeleteQueries DeleteQueries = nullptr;
+    PFN_glBeginQuery BeginQuery = nullptr;
+    PFN_glEndQuery EndQuery = nullptr;
+    PFN_glGetQueryObjectui64v GetQueryObjectui64v = nullptr;
+    PFN_glActiveTexture ActiveTexture = nullptr;
     PFN_glGetError GetError = nullptr;
     PFN_glDisable Disable = nullptr;
     PFN_glGetString GetString = nullptr;
+    PFN_glGetStringi GetStringi = nullptr;
+    PFN_glGetIntegerv GetIntegerv = nullptr;
 };
 
 // The single global set of loaded function pointers. Defined in

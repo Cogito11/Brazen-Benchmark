@@ -28,8 +28,9 @@ before anything starts:
 - **RAM**: buffer size (8/16/32/64/128 MB -- bigger sizes better defeat
   large L3 caches on high-end CPUs), an auto/manual thread count, mode,
   and duration.
-- **GPU**: render resolution (256 up to 2048), and duration. No mode
-  selector -- GPU work has no single/multi-core equivalent (see
+- **GPU**: workload checkboxes (ALU, texture, and fill rate), render
+  resolution (256 up to 2048), and duration per selected workload. No
+  mode selector -- GPU work has no single/multi-core equivalent (see
   "Why GPU testing is architecturally different" below).
 
 Each category remembers its own settings independently between opens
@@ -47,7 +48,9 @@ to the Results tab.
 | Hashing | CPU | FNV-style buffer hashing (sequential memory read) | MB/s |
 | Sorting | CPU | `std::sort` over randomized integer arrays | Melems/s |
 | RAM Bandwidth | RAM | Sequential copy over a configurable, >cache-size buffer | GB/s |
-| GPU Compute | GPU | Per-pixel iterative shader loop (~11 FLOPs/iter, approximate) | GFLOPS |
+| GPU ALU | GPU | Per-pixel iterative floating-point shader workload | GFLOPS |
+| GPU Texture | GPU | Repeated filtered texture sampling | GB/s |
+| GPU Fill Rate | GPU | Fullscreen raster/fill throughput | Gpixels/s |
 
 ## Building
 
@@ -159,8 +162,9 @@ src/
                                        via constructor (see below)
   gpu/                      GPU testing -- deliberately separate, see below
     GLLoader.h / .cpp       Minimal OpenGL 3.3 core function loader
-    GpuComputeTest.h / .cpp  Shader/FBO setup + the actual draw call;
-                             resolution is changeable via SetResolution()
+    GpuComputeTest.h / .cpp  Shader/FBO/texture setup plus ALU, texture,
+                 and fill-rate workloads; resolution is
+                 changeable via SetResolution()
     GpuTestRunner.h / .cpp   Calibration + timed-run state machine, driven
                              from the main thread's render loop; also
                              exposes GPU vendor/renderer strings
@@ -205,10 +209,9 @@ oriented) context-sharing setup is unsafe. So GPU testing intentionally
 does **not** go through `IBenchmarkTest`/`BenchmarkRunner` at all --
 `GpuTestRunner` is driven once per frame from `main.cpp`, on the same
 thread that owns the GL context and runs the render loop. A side effect:
-because each work chunk blocks briefly on `glFinish()` to get an
-accurate timing measurement, the UI renders at a reduced frame rate
-while a GPU run is active. That's expected, not a bug, and matches how
-most standalone GPU stress-test tools behave.
+because each work chunk waits for GPU completion, using timer queries when
+available and `glFinish()` as a fallback, the UI renders at a reduced frame
+rate while a GPU run is active. That's expected, not a bug.
 
 `GpuTestRunner::PollAndAdvance()` still produces a `BenchmarkResult` --
 the same struct CPU/RAM tests produce -- so GPU runs show up in the same

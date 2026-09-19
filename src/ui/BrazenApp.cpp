@@ -545,12 +545,35 @@ void BrazenApp::DrawGpuBenchmarkTab() {
                             "This build can only benchmark the Active GPU. Select it to run.");
 
     ImGui::Spacing();
+    ImGui::Text("Tests to include");
+    if (DrawHelpButton("gpu_tests"))
+        ImGui::TextWrapped(
+            "Each workload measures a different part of the GPU. ALU "
+            "tests arithmetic throughput, Texture tests filtered sampling, "
+            "and Fill Rate tests fullscreen raster throughput. All three "
+            "are selected by default, but you can run only the workloads "
+            "you need.");
+    int selectedGpuTests = 0;
+            ImGui::Checkbox("ALU", &m_gpuSettings.runAlu);
+    ImGui::SameLine();
+    ImGui::TextDisabled("- floating-point shader throughput");
+    if (m_gpuSettings.runAlu) selectedGpuTests++;
+    ImGui::Checkbox("Texture", &m_gpuSettings.runTexture);
+    ImGui::SameLine();
+    ImGui::TextDisabled("- filtered texture sampling");
+    if (m_gpuSettings.runTexture) selectedGpuTests++;
+    ImGui::Checkbox("Fill Rate", &m_gpuSettings.runFill);
+    ImGui::SameLine();
+    ImGui::TextDisabled("- fullscreen raster throughput");
+    if (m_gpuSettings.runFill) selectedGpuTests++;
+
+    ImGui::Spacing();
     ImGui::Text("Render resolution");
     if (DrawHelpButton("gpu_res"))
         ImGui::TextWrapped(
             "Higher resolutions mean more shader work per draw; mainly "
-            "affects how finely the score is sampled, not what's "
-            "measured.");
+            "increases the amount of work in all three GPU workloads: "
+            "ALU, texture sampling, and fill rate.");
     ImGui::SetNextItemWidth(240);
     ImGui::Combo("##gpures", &m_gpuSettings.resolutionIndex, kGpuResolutionLabels,
                   static_cast<int>(sizeof(kGpuResolutionLabels) / sizeof(kGpuResolutionLabels[0])));
@@ -561,9 +584,11 @@ void BrazenApp::DrawGpuBenchmarkTab() {
         ImGui::TextWrapped(
             "GPU work has no single/multi-core equivalent (a GL context "
             "can only run on one thread), so there's no mode selector "
-            "here, just how long the test runs.");
+            "here. The selected duration applies to each of the three "
+            "GPU workloads, so a complete GPU run takes roughly three "
+            "times that long.");
     ImGui::SetNextItemWidth(-1);
-    ImGui::SliderFloat("##gpuduration", &m_gpuSettings.durationSeconds, 1.0f, 30.0f, "%.0f s");
+    ImGui::SliderFloat("##gpuduration", &m_gpuSettings.durationSeconds, 1.0f, 30.0f, "%.0f s/workload");
 
     ImGui::Spacing();
     ImGui::Spacing();
@@ -572,11 +597,15 @@ void BrazenApp::DrawGpuBenchmarkTab() {
     if (ImGui::Button("Reset Defaults", ImVec2(AutoButtonWidth("Reset Defaults", 140.0f), 0)))
         m_gpuSettings = GpuSettings{};
     ImGui::SameLine();
-    bool canRunGpu = gpuAvailable && selectedIsActive;
+    bool canRunGpu = gpuAvailable && selectedIsActive && selectedGpuTests > 0;
     if (!canRunGpu) ImGui::BeginDisabled();
     bool runClicked = ImGui::Button("Run Benchmark", ImVec2(AutoButtonWidth("Run Benchmark", 150.0f), 0));
     if (!canRunGpu) ImGui::EndDisabled();
     if (runClicked) StartGpuBenchmark();
+    if (selectedGpuTests == 0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("(select at least one test)");
+    }
 }
 
 void BrazenApp::StartGpuBenchmark() {
@@ -584,7 +613,10 @@ void BrazenApp::StartGpuBenchmark() {
     int w = kGpuResolutions[m_gpuSettings.resolutionIndex][0];
     int h = kGpuResolutions[m_gpuSettings.resolutionIndex][1];
     m_gpuRunner->SetResolution(w, h); // no-op if a run is already in progress
-    m_gpuRunner->RequestRun(m_gpuSettings.durationSeconds);
+    unsigned workloadMask = (m_gpuSettings.runAlu ? 1u : 0u) |
+                            (m_gpuSettings.runTexture ? 2u : 0u) |
+                            (m_gpuSettings.runFill ? 4u : 0u);
+    m_gpuRunner->RequestRun(m_gpuSettings.durationSeconds, workloadMask);
     m_currentView = SidebarView::Results;
 }
 
@@ -789,6 +821,103 @@ void BrazenApp::DrawResultsView() {
     ImGui::BeginChild("ScoreMulti", ImVec2(0, ImGui::GetFontSize() * 4.2f), true);
     DrawScoreCard("Multi-Core", multiScore);
     ImGui::EndChild();
+
+    // Keep one latest completed result per test and mode so repeated runs do
+    // not distort the component summary. GPU workloads intentionally remain
+    // separate because their units measure different things.
+    std::map<std::string, BenchmarkResult> latestComponentResults;
+    for (const auto& entry : m_resultEntries) {
+        if (entry.result.cancelled) continue;
+        std::string key = entry.result.testName + "#" +
+                          std::to_string(static_cast<int>(entry.result.mode));
+        latestComponentResults[key] = entry.result;
+    }
+
+    auto collectResults = [&latestComponentResults](auto matches) {
+        std::vector<BenchmarkResult> results;
+        for (const auto& item : latestComponentResults) {
+            if (matches(item.second)) results.push_back(item.second);
+        }
+        return results;
+    };
+    auto averageScore = [](const std::vector<BenchmarkResult>& results) {
+        double total = 0.0;
+        for (const auto& result : results) total += result.score;
+        return results.empty() ? 0.0 : total / static_cast<double>(results.size());
+    };
+
+    auto ramResults = collectResults([](const BenchmarkResult& result) {
+        return result.testName == "RAM Bandwidth";
+    });
+    auto storageResults = collectResults([](const BenchmarkResult& result) {
+        return result.testName == "Disk Read" || result.testName == "Disk Write";
+    });
+    auto gpuAluResults = collectResults([](const BenchmarkResult& result) {
+        return result.testName == "GPU ALU";
+    });
+    auto gpuTextureResults = collectResults([](const BenchmarkResult& result) {
+        return result.testName == "GPU Texture";
+    });
+    auto gpuFillResults = collectResults([](const BenchmarkResult& result) {
+        return result.testName == "GPU Fill Rate";
+    });
+
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(0.5f, 0.7f, 1.0f, 1.0f), "Component Averages");
+    if (DrawHelpButton("component_averages"))
+        ImGui::TextWrapped(
+            "These values use the latest completed result for each test and "
+            "mode. RAM and storage share one unit, so their values are "
+            "averaged directly. GPU workloads use different units and are "
+            "shown separately rather than combined into a misleading number.");
+    ImGui::Separator();
+    if (ImGui::BeginTable("ComponentAverages", 3,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("Component");
+        ImGui::TableSetupColumn("Average");
+        ImGui::TableSetupColumn("Coverage");
+        ImGui::TableHeadersRow();
+
+        auto drawAverageRow = [&averageScore](const char* label, const std::vector<BenchmarkResult>& results,
+                              const char* fallback) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(label);
+            ImGui::TableSetColumnIndex(1);
+            if (results.empty()) {
+                ImGui::TextDisabled("No runs yet");
+            } else {
+                ImGui::Text("%.2f %s", averageScore(results), results.front().unit.c_str());
+            }
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextDisabled("%s", results.empty() ? fallback : "Latest result per mode");
+        };
+
+        drawAverageRow("RAM", ramResults, "Run RAM benchmark");
+        drawAverageRow("Storage", storageResults, "Run SSD benchmark");
+
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted("GPU");
+        ImGui::TableSetColumnIndex(1);
+        if (gpuAluResults.empty() && gpuTextureResults.empty() && gpuFillResults.empty()) {
+            ImGui::TextDisabled("No runs yet");
+        } else {
+            if (!gpuAluResults.empty())
+                ImGui::Text("ALU %.2f GFLOPS", averageScore(gpuAluResults));
+            if (!gpuTextureResults.empty())
+                ImGui::Text("Texture %.2f GB/s", averageScore(gpuTextureResults));
+            if (!gpuFillResults.empty())
+                ImGui::Text("Fill %.2f Gpixels/s", averageScore(gpuFillResults));
+        }
+        ImGui::TableSetColumnIndex(2);
+        int gpuWorkloads = (!gpuAluResults.empty() ? 1 : 0) +
+                           (!gpuTextureResults.empty() ? 1 : 0) +
+                           (!gpuFillResults.empty() ? 1 : 0);
+        ImGui::TextDisabled("%d / 3 workloads", gpuWorkloads);
+
+        ImGui::EndTable();
+    }
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -1185,7 +1314,7 @@ void BrazenApp::DrawAppInfoView() {
         "tool for CPU, RAM, GPU, and drive performance. It runs a set "
         "of self-contained workloads: integer math, floating point, "
         "prime sieving, hashing, sorting, sequential RAM bandwidth, a "
-        "GPU fragment-shader compute test, and sequential disk "
+        "GPU ALU, texture, and fill-rate tests, and sequential disk "
         "write/read-back, and reports throughput scores you can "
         "compare against this machine over time, or against another "
         "machine running the same tests.\n\n"

@@ -7,17 +7,16 @@
 
 namespace brazen {
 
-// Drives the GPU compute test from the main/render thread, one work
+// Drives a small GPU workload suite from the main/render thread, one work
 // chunk per call to PollAndAdvance(). This is intentionally NOT run
 // through BenchmarkManager's background thread pool: an OpenGL context
 // can only be current on (and safely driven from) one thread at a time,
 // so GPU work has to happen on whichever thread owns the GL context --
 // here, that's the same thread running the render loop in main.cpp.
 //
-// A side effect worth knowing: because each work chunk blocks briefly on
-// glFinish() to get an accurate timing measurement, the UI will render
-// at a reduced frame rate while a GPU run is in progress. That's
-// expected and matches how most GPU benchmark/stress tools behave.
+// A side effect worth knowing: each work chunk waits for GPU completion so
+// the result is measured rather than merely queued, so the UI renders at a
+// reduced frame rate while a GPU run is in progress.
 class GpuTestRunner {
 public:
     // Loads the required GL functions and compiles/links the test's
@@ -48,8 +47,9 @@ public:
     int Height() const { return m_test.Height(); }
 
     // Starts a run; ignored if one is already in progress or the GPU
-    // test isn't supported on this system.
-    void RequestRun(double durationSeconds);
+    // test isn't supported on this system. workloadMask uses bit 0 for
+    // ALU, bit 1 for texture, and bit 2 for fill rate.
+    void RequestRun(double durationSeconds, unsigned workloadMask = 0x7u);
     void Cancel();
     bool IsBusy() const { return m_state != State::Idle; }
     std::string StatusText() const;
@@ -66,6 +66,8 @@ private:
     enum class State { Idle, Calibrating, Running };
 
     void FinalizeResult(BenchmarkResult* outResult, bool cancelled);
+    void BeginWorkload();
+    const char* WorkloadName() const;
 
     GpuComputeTest m_test;
     bool m_supported = false;
@@ -79,6 +81,9 @@ private:
     int m_iterationsPerDraw = 200; // set by calibration at the start of each run
     double m_elapsedSeconds = 0.0;
     uint64_t m_totalOps = 0;
+    int m_workloadIndex = 0;
+    unsigned m_workloadMask = 0x7u;
+    std::chrono::steady_clock::time_point m_workloadStart;
 };
 
 } // namespace brazen

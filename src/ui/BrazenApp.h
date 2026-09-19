@@ -208,6 +208,9 @@ private:
     struct GpuSettings {
         float durationSeconds = 8.0f;
         int resolutionIndex = 1;      // into kGpuResolutions -> default 512x512 (today's original default)
+        bool runAlu = true;
+        bool runTexture = true;
+        bool runFill = true;
         // Index into the GPU tab's combo box: 0 is always "the active
         // GPU" (a synthetic entry, not part of m_allGpus); indices 1+
         // map to m_allGpus[index - 1]. Only index 0 can actually be run.

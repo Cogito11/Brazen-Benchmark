@@ -71,9 +71,20 @@ bool LoadGLFunctions(GLGetProcAddressFn getProcAddress) {
     BRAZEN_LOAD(Clear, "glClear");
     BRAZEN_LOAD(DrawArrays, "glDrawArrays");
     BRAZEN_LOAD(Finish, "glFinish");
+    // Timer queries are optional on an OpenGL 3.3 context. The benchmark
+    // falls back to synchronized CPU timing when the extension is absent.
+    LoadOne(getProcAddress, "glGenQueries", gl.GenQueries);
+    LoadOne(getProcAddress, "glDeleteQueries", gl.DeleteQueries);
+    LoadOne(getProcAddress, "glBeginQuery", gl.BeginQuery);
+    LoadOne(getProcAddress, "glEndQuery", gl.EndQuery);
+    bool timer64 = LoadOne(getProcAddress, "glGetQueryObjectui64v", gl.GetQueryObjectui64v);
+    if (!timer64) LoadOne(getProcAddress, "glGetQueryObjectui64vEXT", gl.GetQueryObjectui64v);
+    LoadOne(getProcAddress, "glActiveTexture", gl.ActiveTexture);
     BRAZEN_LOAD(GetError, "glGetError");
     BRAZEN_LOAD(Disable, "glDisable");
     BRAZEN_LOAD(GetString, "glGetString");
+    BRAZEN_LOAD(GetStringi, "glGetStringi");
+    BRAZEN_LOAD(GetIntegerv, "glGetIntegerv");
 
 #undef BRAZEN_LOAD
 
