@@ -94,6 +94,15 @@ jobs:
         run: |
           Xvfb :99 -screen 0 1280x1024x24 &
           export DISPLAY=:99
+          # Xvfb takes a moment to actually bind the display after being
+          # backgrounded; launching Brazen immediately (what an earlier
+          # version of this step did) races it and fails with "Failed to
+          # open display :99" even though Xvfb is about to be ready.
+          # Poll for its lock file instead of guessing a fixed sleep.
+          for i in $(seq 1 20); do
+            [ -e /tmp/.X99-lock ] && break
+            sleep 0.25
+          done
           timeout 5 ./build/Brazen &
           APP_PID=$!
           sleep 2
