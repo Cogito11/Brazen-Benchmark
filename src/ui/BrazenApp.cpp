@@ -48,6 +48,7 @@ const char* kGpuResolutionLabels[] = {"256 x 256 (fastest)", "512 x 512 (default
 // DiskIoTest's own hardcoded default.
 constexpr int kSsdChunkSizesMB[] = {4, 16, 64, 256};
 const char* kSsdChunkSizeLabels[] = {"4 MB", "16 MB", "64 MB", "256 MB"};
+constexpr unsigned kMaxDiskBenchmarkThreads = 4;
 
 std::string NowTimestampString() {
     std::time_t t = std::time(nullptr);
@@ -315,7 +316,7 @@ void BrazenApp::DrawBenchmarksView() {
             DrawRamBenchmarkTab();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("SSD")) {
+        if (ImGui::BeginTabItem("Disk")) {
             m_currentBenchmarkTab = BenchmarkTab::Ssd;
             DrawSsdBenchmarkTab();
             ImGui::EndTabItem();
@@ -428,6 +429,18 @@ void BrazenApp::DrawRamBenchmarkTab() {
     ImGui::SetNextItemWidth(240);
     ImGui::Combo("##ramsize", &m_ramSettings.bufferSizeIndex, kRamBufferSizeLabels,
                   static_cast<int>(sizeof(kRamBufferSizeLabels) / sizeof(kRamBufferSizeLabels[0])));
+    unsigned estimatedThreads = m_ramSettings.autoThreadCount
+        ? std::max(1u, m_hardwareInfo.logicalCores)
+        : static_cast<unsigned>(std::max(1, m_ramSettings.threadCountOverride));
+    uint64_t estimatedBytes = static_cast<uint64_t>(kRamBufferSizesMB[m_ramSettings.bufferSizeIndex]) *
+                              1024ull * 1024ull * 2ull * estimatedThreads;
+    ImGui::TextDisabled("Estimated multi-core allocation: %s (%u thread%s)",
+                        FormatBytesAsGB(estimatedBytes).c_str(), estimatedThreads,
+                        estimatedThreads == 1 ? "" : "s");
+    if (m_hardwareInfo.totalRamBytes > 0 && estimatedBytes > m_hardwareInfo.totalRamBytes / 2) {
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
+                           "This setting uses more than half of installed RAM.");
+    }
 
     ImGui::Spacing();
     ImGui::Text("Threads");
@@ -645,10 +658,12 @@ void BrazenApp::StartSsdBenchmark() {
                                m_ssdSettings.durationSeconds);
         if (m_ssdSettings.mode == CategoryRunMode::MultiCoreOnly || m_ssdSettings.mode == CategoryRunMode::Both)
             m_manager.Enqueue(std::make_shared<DiskIoTest>(targetDir, op, chunkBytes), RunMode::MultiCore,
-                               m_ssdSettings.durationSeconds);
+                               m_ssdSettings.durationSeconds,
+                               std::min(kMaxDiskBenchmarkThreads,
+                                        std::max(1u, m_hardwareInfo.logicalCores)));
     };
-    enqueueOp(DiskIoMode::Write);
-    enqueueOp(DiskIoMode::Read);
+    if (m_ssdSettings.runWrite) enqueueOp(DiskIoMode::Write);
+    if (m_ssdSettings.runRead) enqueueOp(DiskIoMode::Read);
 
     m_currentView = SidebarView::Results;
 }
@@ -656,8 +671,9 @@ void BrazenApp::StartSsdBenchmark() {
 void BrazenApp::DrawSsdBenchmarkTab() {
     ImGui::Spacing();
     ImGui::TextWrapped(
-        "Running this produces two separate results, Disk Write and "
-        "Disk Read, since throughput can differ between the two.");
+        "Running this produces separate Disk Write and Disk Read results "
+        "by default, since throughput can differ between the two. You can "
+        "also select only one direction.");
     ImGui::Spacing();
 
     ImGui::Text("Drive to test");
@@ -700,6 +716,14 @@ void BrazenApp::DrawSsdBenchmarkTab() {
             }
             ImGui::EndCombo();
         }
+        if (m_ssdSettings.selectedDriveIndex >= 0 &&
+            m_ssdSettings.selectedDriveIndex < static_cast<int>(m_allDrives.size())) {
+            const auto& selectedDrive = m_allDrives[static_cast<size_t>(m_ssdSettings.selectedDriveIndex)];
+            if (!selectedDrive.path.empty()) {
+                ImGui::TextWrapped("Temporary test files will be written to: %s",
+                                   selectedDrive.path.c_str());
+            }
+        }
     }
 
     ImGui::Spacing();
@@ -722,6 +746,25 @@ void BrazenApp::DrawSsdBenchmarkTab() {
                   static_cast<int>(sizeof(kSsdChunkSizeLabels) / sizeof(kSsdChunkSizeLabels[0])));
 
     ImGui::Spacing();
+    ImGui::Text("Tests to include");
+    if (DrawHelpButton("ssd_tests"))
+        ImGui::TextWrapped(
+            "Write measures sustained durable writes and Read measures "
+            "sequential reads. Both are selected by default, but either "
+            "one can be run independently.");
+    int selectedStorageTests = 0;
+    ImGui::Checkbox("Write", &m_ssdSettings.runWrite);
+    ImGui::SameLine();
+    ImGui::TextDisabled("- durable sequential writes");
+    if (m_ssdSettings.runWrite) selectedStorageTests++;
+    ImGui::Checkbox("Read", &m_ssdSettings.runRead);
+    ImGui::SameLine();
+    ImGui::TextDisabled("- sequential reads");
+    if (m_ssdSettings.runRead) selectedStorageTests++;
+    if (m_ssdSettings.runWrite)
+        ImGui::TextDisabled("Write tests repeatedly persist data for the selected duration; this measures durable throughput but adds drive wear.");
+
+    ImGui::Spacing();
     ImGui::Text("Mode");
     if (DrawHelpButton("ssd_mode"))
         ImGui::TextWrapped(
@@ -736,6 +779,44 @@ void BrazenApp::DrawSsdBenchmarkTab() {
     ImGui::SameLine();
     ImGui::RadioButton("Both", &mode, static_cast<int>(CategoryRunMode::Both));
     m_ssdSettings.mode = static_cast<CategoryRunMode>(mode);
+    if (m_ssdSettings.mode != CategoryRunMode::SingleCoreOnly) {
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Multi-Core disk testing has tradeoffs:");
+        ImGui::TextWrapped(
+            "It can take longer to prepare, use temporary storage, and "
+            "measure concurrent I/O queue behavior rather than a drive's "
+            "simple single-request speed. Multi-Core results should not be "
+            "compared directly with Single-Core results or used as a SATA "
+            "link-speed reading.");
+            unsigned plannedThreads = std::min(kMaxDiskBenchmarkThreads,
+                               std::max(1u, m_hardwareInfo.logicalCores));
+            size_t selectedChunkBytes = static_cast<size_t>(kSsdChunkSizesMB[m_ssdSettings.chunkSizeIndex]) *
+                            1024ull * 1024ull;
+            size_t fixtureBytes = selectedChunkBytes * 2ull * plannedThreads;
+            ImGui::TextDisabled("Multi-Core is capped at %u workers and %.1f GB maximum temporary data per direction.",
+                        plannedThreads, static_cast<double>(fixtureBytes) / (1000.0 * 1000.0 * 1000.0));
+    }
+
+    size_t selectedChunkBytes = static_cast<size_t>(kSsdChunkSizesMB[m_ssdSettings.chunkSizeIndex]) *
+                                1024ull * 1024ull;
+    unsigned plannedThreads = m_ssdSettings.mode == CategoryRunMode::SingleCoreOnly
+        ? 1u
+        : std::min(kMaxDiskBenchmarkThreads, std::max(1u, m_hardwareInfo.logicalCores));
+    size_t plannedFixtureBytes = selectedChunkBytes * 2ull *
+        ((m_ssdSettings.runWrite && plannedThreads > 1) ? plannedThreads : 1u);
+    constexpr size_t kDiskFreeSpaceReserve = 512ull * 1024ull * 1024ull;
+    bool enoughFreeSpace = false;
+    if (m_ssdSettings.selectedDriveIndex >= 0 &&
+        m_ssdSettings.selectedDriveIndex < static_cast<int>(m_allDrives.size())) {
+        const auto& selectedDrive = m_allDrives[static_cast<size_t>(m_ssdSettings.selectedDriveIndex)];
+        enoughFreeSpace = selectedDrive.freeBytes >= plannedFixtureBytes + kDiskFreeSpaceReserve;
+        if (selectedDrive.path.empty()) enoughFreeSpace = false;
+    }
+    if (!enoughFreeSpace && m_ssdSettings.selectedDriveIndex >= 0 &&
+        m_ssdSettings.selectedDriveIndex < static_cast<int>(m_allDrives.size()) &&
+        !m_allDrives[static_cast<size_t>(m_ssdSettings.selectedDriveIndex)].path.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
+                           "Not enough reported free space for the bounded test fixture and safety reserve.");
+    }
 
     ImGui::Spacing();
     ImGui::Text("Duration per test");
@@ -754,7 +835,8 @@ void BrazenApp::DrawSsdBenchmarkTab() {
         m_ssdSettings.selectedDriveIndex = keepDrive;
     }
     ImGui::SameLine();
-    bool canStart = m_ssdSettings.selectedDriveIndex >= 0 &&
+    bool canStart = selectedStorageTests > 0 && enoughFreeSpace &&
+                    m_ssdSettings.selectedDriveIndex >= 0 &&
                      m_ssdSettings.selectedDriveIndex < static_cast<int>(m_allDrives.size()) &&
                      !m_allDrives[static_cast<size_t>(m_ssdSettings.selectedDriveIndex)].path.empty();
     if (!canStart) ImGui::BeginDisabled();
@@ -763,7 +845,8 @@ void BrazenApp::DrawSsdBenchmarkTab() {
     if (!canStart) ImGui::EndDisabled();
     if (!canStart) {
         ImGui::SameLine();
-        ImGui::TextDisabled("(select a writable drive)");
+        ImGui::TextDisabled(selectedStorageTests == 0 ? "(select at least one test)" :
+                    !enoughFreeSpace ? "(insufficient free space)" : "(select a writable drive)");
     }
 }
 
@@ -894,7 +977,7 @@ void BrazenApp::DrawResultsView() {
         };
 
         drawAverageRow("RAM", ramResults, "Run RAM benchmark");
-        drawAverageRow("Storage", storageResults, "Run SSD benchmark");
+        drawAverageRow("Storage", storageResults, "Run Disk benchmark");
 
         ImGui::TableNextRow();
         ImGui::TableSetColumnIndex(0);
@@ -1318,9 +1401,9 @@ void BrazenApp::DrawAppInfoView() {
         "write/read-back, and reports throughput scores you can "
         "compare against this machine over time, or against another "
         "machine running the same tests.\n\n"
-        "CPU, RAM, and SSD tests can each be run single-core, "
+        "CPU, RAM, and Disk tests can each be run single-core, "
         "multi-core, or both, with a configurable duration and, for "
-        "RAM and SSD, a configurable buffer/chunk size. The SSD tab "
+        "RAM and Disk, a configurable buffer/chunk size. The Disk tab "
         "lets you pick which detected drive to target. GPUs and drives "
         "are both fully enumerated in System Info; GPU selection is "
         "shown too, though only the GPU actually driving this window "

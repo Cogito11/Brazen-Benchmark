@@ -32,6 +32,11 @@ before anything starts:
   resolution (256 up to 2048), and duration per selected workload. No
   mode selector -- GPU work has no single/multi-core equivalent (see
   "Why GPU testing is architecturally different" below).
+- **Disk**: write/read checkboxes, target drive, chunk size, single-core /
+  multi-core mode, and duration. Both directions are selected by default;
+  Single-Core is the default mode because Multi-Core creates one temporary
+  file per worker, takes longer to prepare, and measures concurrent I/O
+  queue behavior rather than simple drive throughput.
 
 Each category remembers its own settings independently between opens
 (a quick CPU check and a long RAM soak test can coexist without one

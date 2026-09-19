@@ -686,6 +686,24 @@ inline void QueryPrimaryDiskInto(std::string& model, unsigned long long& totalBy
 // Parses /proc/mounts into (device name without "/dev/", mount point)
 // pairs, skipping pseudo-filesystems (tmpfs, proc, etc.) that don't
 // start with "/dev/".
+inline std::string UnescapeMountFieldLinux(const std::string& field) {
+    std::string result;
+    result.reserve(field.size());
+    for (size_t i = 0; i < field.size(); ++i) {
+        if (field[i] == '\\' && i + 3 < field.size() &&
+            field[i + 1] >= '0' && field[i + 1] <= '7' &&
+            field[i + 2] >= '0' && field[i + 2] <= '7' &&
+            field[i + 3] >= '0' && field[i + 3] <= '7') {
+            int value = (field[i + 1] - '0') * 64 + (field[i + 2] - '0') * 8 + (field[i + 3] - '0');
+            result.push_back(static_cast<char>(value));
+            i += 3;
+        } else {
+            result.push_back(field[i]);
+        }
+    }
+    return result;
+}
+
 inline std::vector<std::pair<std::string, std::string>> ParseMountedPartitionsLinux() {
     std::vector<std::pair<std::string, std::string>> out;
     std::ifstream file("/proc/mounts");
@@ -695,7 +713,7 @@ inline std::vector<std::pair<std::string, std::string>> ParseMountedPartitionsLi
         std::string dev, mnt, fstype;
         if (!(iss >> dev >> mnt >> fstype)) continue;
         if (dev.rfind("/dev/", 0) != 0) continue;
-        out.emplace_back(dev.substr(5), mnt);
+        out.emplace_back(UnescapeMountFieldLinux(dev.substr(5)), UnescapeMountFieldLinux(mnt));
     }
     return out;
 }

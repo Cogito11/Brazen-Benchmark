@@ -220,8 +220,10 @@ private:
 
     struct SsdSettings {
         float durationSeconds = 8.0f;
-        CategoryRunMode mode = CategoryRunMode::Both;
+        CategoryRunMode mode = CategoryRunMode::SingleCoreOnly;
         int chunkSizeIndex = 1;       // into kSsdChunkSizesMB -> default 16 MB
+        bool runWrite = true;
+        bool runRead = true;
         // Index into m_allDrives of the drive to benchmark; -1 until a
         // drive with a usable path has been found/chosen.
         int selectedDriveIndex = -1;

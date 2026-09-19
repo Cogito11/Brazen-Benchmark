@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <mutex>
 #include <random>
 #include <vector>
 
@@ -63,7 +65,8 @@ enum class DiskIoMode { Write, Read };
 class DiskIoTest : public IBenchmarkTest {
 public:
     explicit DiskIoTest(std::filesystem::path targetDir, DiskIoMode mode, size_t chunkBytes = kDefaultChunkBytes)
-        : m_targetDir(std::move(targetDir)), m_mode(mode), m_chunkBytes(chunkBytes) {}
+                : m_targetDir(std::move(targetDir)), m_mode(mode), m_chunkBytes(chunkBytes),
+                    m_readFixture(mode == DiskIoMode::Read ? std::make_shared<ReadFixture>() : nullptr) {}
 
     std::string GetName() const override {
         return m_mode == DiskIoMode::Write ? "Disk Write" : "Disk Read";
@@ -89,36 +92,68 @@ public:
             b = static_cast<unsigned char>(seed & 0xFF);
         }
 
-        std::random_device rd;
-        char nameBuf[64];
-        for (unsigned attempt = 0; attempt < 8; ++attempt) {
-            std::snprintf(nameBuf, sizeof(nameBuf), "brazen_disktest_%08x_%08x.tmp", rd(), rd());
-            m_filePath = m_targetDir / nameBuf;
-            std::error_code ec;
-            if (!std::filesystem::exists(m_filePath, ec) && !ec) break;
-            m_filePath.clear();
-        }
-        if (m_filePath.empty()) return;
-
         if (m_mode == DiskIoMode::Read) {
-            // The read test needs something to read. Write it once,
-            // untimed, up front, rather than as part of the timed loop.
-            // Flushed to the physical device (not just fflush()'d to the
-            // OS page cache) so the DONTNEED hint in DropFromPageCache
-            // has clean, already-persisted pages to actually evict.
-            // posix_fadvise can't drop pages that are still dirty.
-            std::FILE* f = std::fopen(m_filePath.string().c_str(), "wb");
-            if (!f) return;
-            size_t written = std::fwrite(m_buffer.data(), 1, m_buffer.size(), f);
-            bool flushed = written == m_buffer.size() && std::fflush(f) == 0 && FlushToDevice(f);
-            bool closed = std::fclose(f) == 0;
-            if (!flushed || !closed || written != m_buffer.size()) {
-                std::error_code ec;
-                std::filesystem::remove(m_filePath, ec);
-                m_filePath.clear();
-                return;
+            // Prepare one flushed fixture for all read workers. Preparing a
+            // separate multi-chunk file per worker made multi-core reads
+            // spend most of their wall time writing duplicate setup data.
+            std::lock_guard<std::mutex> lock(m_readFixture->mutex);
+            if (!m_readFixture->ready) {
+                std::random_device rd;
+                char nameBuf[64];
+                for (unsigned attempt = 0; attempt < 8; ++attempt) {
+                    std::snprintf(nameBuf, sizeof(nameBuf), "brazen_disktest_%08x_%08x.tmp", rd(), rd());
+                    m_readFixture->path = m_targetDir / nameBuf;
+                    std::error_code ec;
+                    if (!std::filesystem::exists(m_readFixture->path, ec) && !ec) break;
+                    m_readFixture->path.clear();
+                }
+                if (m_readFixture->path.empty()) return;
+
+                std::FILE* f = std::fopen(m_readFixture->path.string().c_str(), "wb");
+                if (!f) return;
+                size_t written = 0;
+                bool complete = true;
+                for (size_t chunk = 0; chunk < kFileChunkCount; ++chunk) {
+                    size_t current = std::fwrite(m_buffer.data(), 1, m_buffer.size(), f);
+                    written += current;
+                    if (current != m_buffer.size()) {
+                        complete = false;
+                        break;
+                    }
+                }
+                bool flushed = complete && std::fflush(f) == 0 && FlushToDevice(f);
+                bool closed = std::fclose(f) == 0;
+                if (!flushed || !closed || written != m_buffer.size() * kFileChunkCount) {
+                    std::error_code ec;
+                    std::filesystem::remove(m_readFixture->path, ec);
+                    m_readFixture->path.clear();
+                    return;
+                }
+                m_readFixture->ready = true;
             }
+            m_filePath = m_readFixture->path;
+        } else {
+            std::random_device rd;
+            char nameBuf[64];
+            for (unsigned attempt = 0; attempt < 8; ++attempt) {
+                std::snprintf(nameBuf, sizeof(nameBuf), "brazen_disktest_%08x_%08x.tmp", rd(), rd());
+                m_filePath = m_targetDir / nameBuf;
+                std::error_code ec;
+                if (!std::filesystem::exists(m_filePath, ec) && !ec) break;
+                m_filePath.clear();
+            }
+            if (m_filePath.empty()) return;
         }
+        m_file = std::fopen(m_filePath.string().c_str(), m_mode == DiskIoMode::Write ? "wb+" : "rb");
+        if (!m_file) {
+            std::error_code ec;
+            std::filesystem::remove(m_filePath, ec);
+            m_filePath.clear();
+            return;
+        }
+        m_fileSize = m_mode == DiskIoMode::Write
+            ? m_chunkBytes * kFileChunkCount
+            : m_chunkBytes * kFileChunkCount;
         m_setupSucceeded = true;
     }
 
@@ -126,19 +161,20 @@ public:
         if (!m_setupSucceeded) return 0;
 
         if (m_mode == DiskIoMode::Write) {
-            std::FILE* f = std::fopen(m_filePath.string().c_str(), "wb");
-            if (!f) return 0;
-            size_t written = std::fwrite(m_buffer.data(), 1, m_buffer.size(), f);
-            bool flushed = written == m_buffer.size() && std::fflush(f) == 0 && FlushToDevice(f);
-            bool closed = std::fclose(f) == 0;
-            return flushed && closed ? static_cast<uint64_t>(written) : 0;
+            if (std::fseek(m_file, static_cast<long>(m_fileOffset), SEEK_SET) != 0) return 0;
+            size_t written = std::fwrite(m_buffer.data(), 1, m_buffer.size(), m_file);
+            bool flushed = written == m_buffer.size() && std::fflush(m_file) == 0 && FlushToDevice(m_file);
+            m_fileOffset += written;
+            if (m_fileOffset >= m_fileSize) m_fileOffset = 0;
+            return flushed ? static_cast<uint64_t>(written) : 0;
         }
 
         DropFromPageCache();
-        std::ifstream in(m_filePath, std::ios::binary);
-        if (!in) return 0;
-        in.read(reinterpret_cast<char*>(m_buffer.data()), static_cast<std::streamsize>(m_buffer.size()));
-        return static_cast<uint64_t>(in.gcount());
+        if (std::fseek(m_file, static_cast<long>(m_fileOffset), SEEK_SET) != 0) return 0;
+        size_t read = std::fread(m_buffer.data(), 1, m_buffer.size(), m_file);
+        m_fileOffset += read;
+        if (m_fileOffset >= m_fileSize) m_fileOffset = 0;
+        return static_cast<uint64_t>(read);
     }
 
     double ComputeScore(uint64_t totalOps, double elapsedSeconds) const override {
@@ -173,14 +209,32 @@ public:
     }
 
     ~DiskIoTest() override {
+        if (m_file) std::fclose(m_file);
+        if (m_readFixture) return;
         if (m_filePath.empty()) return;
         std::error_code ec;
         std::filesystem::remove(m_filePath, ec);
     }
 
     static constexpr size_t kDefaultChunkBytes = 16ull * 1024 * 1024; // 16 MB per chunk
+    // Keep the per-worker fixture bounded. Multi-core runs are intentionally
+    // capped by the UI/queue to avoid multiplying this into many gigabytes.
+    static constexpr size_t kFileChunkCount = 2;
 
 private:
+    struct ReadFixture {
+        ~ReadFixture() {
+            if (!path.empty()) {
+                std::error_code ec;
+                std::filesystem::remove(path, ec);
+            }
+        }
+
+        std::mutex mutex;
+        std::filesystem::path path;
+        bool ready = false;
+    };
+
     // Forces data written via `f` out of the OS page cache and onto the
     // physical device, so a write chunk's timing includes real
     // persistence rather than just handing bytes to the OS. Without
@@ -236,6 +290,10 @@ private:
     std::filesystem::path m_filePath;
     DiskIoMode m_mode;
     size_t m_chunkBytes;
+    std::FILE* m_file = nullptr;
+    size_t m_fileOffset = 0;
+    size_t m_fileSize = 0;
+    std::shared_ptr<ReadFixture> m_readFixture;
     bool m_setupSucceeded = false;
     std::vector<unsigned char> m_buffer;
 };
