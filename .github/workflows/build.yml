@@ -114,6 +114,29 @@ jobs:
           echo "Brazen is still running after 2 seconds, looks healthy."
           kill $APP_PID
 
+      # windows-latest runners only expose the stock "Microsoft Basic
+      # Display Adapter", a software stub good for OpenGL 1.1 -- but
+      # main.cpp requests an OpenGL 3.3 core, forward-compatible context,
+      # so glfwCreateWindow returns null and Brazen.exe exits immediately.
+      # This is the Windows equivalent of what Xvfb's bundled Mesa
+      # (llvmpipe) already provides for the Linux smoke test above: a
+      # software OpenGL implementation that actually supports a modern
+      # context. Dropping Mesa's opengl32.dll next to Brazen.exe (rather
+      # than installing it system-wide) only affects this smoke-test
+      # step, since Windows loads a DLL from the executable's own
+      # directory before it looks at System32 -- the shipped .exe is
+      # untouched and still uses whatever real GPU driver the user has.
+      - name: Install software OpenGL for Windows GUI smoke test
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -match "release-msvc\.7z$" } | Select-Object -First 1
+          if (-not $asset) { throw "Could not find a release-msvc.7z asset in the latest mesa-dist-win release." }
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile mesa.7z
+          & "C:\Program Files\7-Zip\7z.exe" x mesa.7z -omesa -y
+          Copy-Item "mesa\x64\opengl32.dll" "build\opengl32.dll" -Force
+
       # Windows runners have a usable desktop session, so no Xvfb
       # equivalent is needed here -- just launch the built exe directly.
       # This is the check that would have caught the missing-DLL bug
