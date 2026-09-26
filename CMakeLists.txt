@@ -30,6 +30,20 @@ if(WIN32)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+# Same reasoning as above, but for MinGW GCC: CI's windows-latest runner
+# has a MinGW toolchain on PATH (bundled with Strawberry Perl) that
+# CMake's compiler auto-detection picks up ahead of MSVC's cl.exe, since
+# nothing in the workflow explicitly sets up the MSVC dev environment.
+# So the actual shipped binary has so far been built with GCC, not MSVC,
+# meaning the CMAKE_MSVC_RUNTIME_LIBRARY setting above was a silent
+# no-op -- it only affects real MSVC builds. Without this, a MinGW build
+# dynamically depends on libwinpthread-1.dll, libgcc_s_seh-1.dll, and
+# libstdc++-6.dll being present on the machine that runs it, none of
+# which ship with stock Windows.
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    add_link_options(-static-libgcc -static-libstdc++ -static)
+endif()
+
 find_package(OpenGL REQUIRED)
 
 # Prefer system GLFW (installed via package manager); fall back to
