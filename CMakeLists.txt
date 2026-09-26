@@ -18,6 +18,18 @@ if(NOT DEFINED BRAZEN_VERSION)
     set(BRAZEN_VERSION "${BRAZEN_DEFAULT_VERSION}")
 endif()
 
+# Statically link the MSVC runtime on Windows. Without this, CMake/MSVC
+# defaults to the dynamic runtime (/MD), which makes Brazen.exe depend on
+# VCRUNTIME140.dll / VCRUNTIME140_1.dll / MSVCP140.dll being present on
+# the machine that runs it -- fine on the CI runner (Visual Studio is
+# preinstalled there) but missing on most end users' machines, causing
+# a "missing DLL" error on launch. Same reasoning as the GLFW static-link
+# fallback above: don't depend on something that only exists on the
+# machine that built it.
+if(WIN32)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 find_package(OpenGL REQUIRED)
 
 # Prefer system GLFW (installed via package manager); fall back to
