@@ -114,6 +114,25 @@ jobs:
           echo "Brazen is still running after 2 seconds, looks healthy."
           kill $APP_PID
 
+      # Windows runners have a usable desktop session, so no Xvfb
+      # equivalent is needed here -- just launch the built exe directly.
+      # This is the check that would have caught the missing-DLL bug
+      # (Brazen.exe depending on the MSVC redistributable) before it
+      # ever shipped, the same way the Linux step above catches the
+      # equivalent class of bug for shared-library dependencies.
+      - name: Smoke-test GUI launch (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "build/Brazen.exe" -PassThru
+          Start-Sleep -Seconds 2
+          if ($proc.HasExited) {
+            Write-Host "Brazen.exe exited within 2 seconds of launch -- treating as a smoke-test failure."
+            exit 1
+          }
+          Write-Host "Brazen.exe is still running after 2 seconds, looks healthy."
+          Stop-Process -Id $proc.Id -Force
+
       - name: Package (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash
