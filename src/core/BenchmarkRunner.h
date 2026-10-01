@@ -21,6 +21,14 @@ struct BenchmarkResult {
     uint64_t totalOps = 0;
     bool cancelled = false;
 
+    // The run couldn't produce a meaningful score (e.g. the disk test
+    // couldn't create its temporary file). `notes` carries the reason.
+    // Failed results are logged and shown, but never feed the composite score.
+    bool failed = false;
+
+    // Optional human-readable detail from the test (how it ran, warnings).
+    std::string notes;
+
     // Whether every worker thread's core-pinning request was accepted by
     // the OS. If false, at least one thread ran unpinned and the score
     // may carry extra scheduler-induced noise (see ThreadAffinity.h).
@@ -32,7 +40,9 @@ struct BenchmarkResult {
 // test concurrently for a fixed duration, then aggregates throughput.
 class BenchmarkRunner {
 public:
-    // durationSeconds: how long the timed portion of the run should last.
+    // durationSeconds: how long the timed portion of the run should last
+    // (for fixed-work tests -- see IBenchmarkTest::RunsToCompletion() --
+    // this is only a safety time limit; they end when their work is done).
     // cancel: optional flag the caller can set from another thread to stop early.
     static BenchmarkResult RunSingleCore(const IBenchmarkTest& test,
                                           double durationSeconds,
@@ -86,6 +96,7 @@ private:
                 allPinned.store(false, std::memory_order_relaxed);
 
             IBenchmarkTest& t = *instances[idx];
+            t.SetCancelFlag(cancel);
             t.Setup();
 
             // The deadline is computed here, after Setup() returns, and
@@ -100,7 +111,11 @@ private:
             auto deadline = loopStart + std::chrono::duration_cast<clock::duration>(
                                              std::chrono::duration<double>(durationSeconds));
             uint64_t ops = 0;
-            while (clock::now() < deadline) {
+            // IsComplete() is always false for time-boxed tests, so for
+            // them this is exactly the old "run until the deadline" loop.
+            // Fixed-work tests (e.g. disk) stop as soon as they've done
+            // all their work; for those, `deadline` is just a safety cap.
+            while (!t.IsComplete() && clock::now() < deadline) {
                 if (cancel && cancel->load(std::memory_order_relaxed)) break;
                 ops += t.RunWorkChunk();
             }
@@ -132,6 +147,10 @@ private:
         result.elapsedSeconds = threadCount > 0 ? totalElapsed / threadCount : 0.0;
 
         result.cancelled = cancel && cancel->load(std::memory_order_relaxed);
+        // Queried on the prototype: tests that can fail keep their error
+        // state somewhere all clones share (see DiskIoTest).
+        result.failed = test.HasFailed();
+        result.notes = test.StatusNote();
         result.affinityPinned = allPinned.load(std::memory_order_relaxed);
 
         uint64_t totalOps = 0;

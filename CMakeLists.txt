@@ -105,7 +105,10 @@ target_include_directories(imgui PUBLIC
 target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
 
 # ---- Main GUI application ----
-add_executable(Brazen
+# WIN32 makes this a Windows GUI-subsystem executable, so launching it
+# doesn't open a separate console window (the app's own Log & Console view
+# replaces it). It has no effect on Linux/macOS.
+add_executable(Brazen WIN32
     src/main.cpp
     src/ui/BrazenApp.cpp
     src/gpu/GLLoader.cpp
@@ -117,6 +120,11 @@ target_link_libraries(Brazen PRIVATE imgui glfw OpenGL::GL)
 target_compile_definitions(Brazen PRIVATE BRAZEN_VERSION="${BRAZEN_VERSION}")
 find_package(Threads REQUIRED)
 target_link_libraries(Brazen PRIVATE Threads::Threads)
+
+if(MSVC)
+    # Keep the plain main() entry point while using the GUI subsystem.
+    target_link_options(Brazen PRIVATE /ENTRY:mainCRTStartup)
+endif()
 
 if(WIN32)
     target_link_libraries(Brazen PRIVATE opengl32)

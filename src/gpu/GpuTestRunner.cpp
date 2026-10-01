@@ -1,4 +1,5 @@
 #include "GpuTestRunner.h"
+#include "../core/Log.h"
 #include <algorithm>
 #include <cstdio>
 
@@ -112,6 +113,8 @@ bool GpuTestRunner::PollAndAdvance(BenchmarkResult* outResult) {
         long long scaled = static_cast<long long>(calibrationIters * scale);
         m_iterationsPerDraw = static_cast<int>(std::max<long long>(20, std::min<long long>(scaled, 2'000'000)));
 
+        LogInfo("GPU", "%s calibrated: %d iterations per draw; timing for %.0f s.", WorkloadName(),
+                m_iterationsPerDraw, m_requestedDuration);
         // Calibration is excluded from the user-requested workload duration.
         m_workloadStart = clock::now();
         m_state = State::Running;
@@ -192,6 +195,7 @@ void GpuTestRunner::BeginWorkload() {
     m_workloadStart = std::chrono::steady_clock::now();
     auto workload = static_cast<GpuComputeTest::Workload>(m_workloadIndex);
     m_test.SetWorkload(workload);
+    LogInfo("GPU", "Starting %s (calibrating first)...", WorkloadName());
     m_state = State::Calibrating;
 }
 

@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <string>
 #include <memory>
 #include <cstdint>
@@ -33,6 +34,15 @@ inline const char* ToString(TestCategory c) {
     return "Unknown";
 }
 
+// Live progress of a test that runs until a fixed amount of work is done
+// (rather than for a fixed amount of time). Reported by GetProgress().
+struct TestProgress {
+    // 0..1 while the test can say how far along it is; negative if it can't.
+    double fraction = -1.0;
+    // Short human-readable phase, e.g. "Preparing test file". May be empty.
+    std::string phase;
+};
+
 // Interface every benchmark test implements. A test performs a fixed,
 // self-contained "chunk" of work each call to RunWorkChunk() and reports
 // how many logical operations it completed. The BenchmarkRunner calls
@@ -54,6 +64,13 @@ public:
     // Unit label for the score this test produces, e.g. "Mops/s", "MB/s".
     virtual std::string GetUnit() const = 0;
 
+    // Called by the runner, on each instance, right before Setup(). Gives
+    // tests whose Setup() can take a long time (e.g. the disk test writing
+    // a multi-GB file to read back) a way to notice a Cancel request
+    // instead of blocking the whole run until Setup() finishes. The flag
+    // outlives the run; may be null. Most tests can ignore it.
+    virtual void SetCancelFlag(const std::atomic<bool>* /*cancel*/) {}
+
     // Called once on a thread before timed work begins (allocate buffers,
     // seed RNG, warm caches, etc.). Not included in the timed measurement.
     virtual void Setup() {}
@@ -73,6 +90,32 @@ public:
 
     // Create a fresh, independent instance of this test (same config).
     virtual std::unique_ptr<IBenchmarkTest> Clone() const = 0;
+
+    // ---- Fixed-work tests (e.g. disk I/O) ----
+    // Most tests are time-boxed: the runner calls RunWorkChunk() until the
+    // requested duration elapses. A test whose natural unit is "do this
+    // much work" (write 1 GB, then read it back) instead returns true here
+    // and reports IsComplete() once it has finished. For such tests the
+    // duration handed to the runner is only a safety time limit, and the
+    // UI shows an elapsed timer/progress instead of a countdown.
+    virtual bool RunsToCompletion() const { return false; }
+
+    // Per-instance: true once this clone has nothing left to do (finished,
+    // or hit an error). The runner stops calling RunWorkChunk() when this
+    // is true. Time-boxed tests never need to override it.
+    virtual bool IsComplete() const { return false; }
+
+    // Safe to call from any thread while a run is in progress, on the
+    // prototype instance the job was queued with (so any state it reads
+    // has to be shared between clones, and thread-safe).
+    virtual TestProgress GetProgress() const { return {}; }
+
+    // Queried on the prototype after a run: did the test hit an error that
+    // makes the score meaningless (e.g. couldn't create its temp file)?
+    // If so, StatusNote() holds the reason. On success StatusNote() may
+    // hold an informational note (e.g. how I/O was performed) or be empty.
+    virtual bool HasFailed() const { return false; }
+    virtual std::string StatusNote() const { return {}; }
 
     // Whether this test is currently runnable. Every built-in CPU/RAM
     // test returns true (the default); this exists as a hook for a

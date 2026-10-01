@@ -1,12 +1,16 @@
 #pragma once
 #include "../core/BenchmarkManager.h"
 #include "../core/HardwareInfo.h"
+#include "../core/Log.h"
 #include "../core/ScoreCalculator.h"
 #include "../core/TestRegistry.h"
 #include "../gpu/GpuTestRunner.h"
 #include <deque>
 #include <map>
+#include <string>
 #include <vector>
+
+struct ImGuiInputTextCallbackData;
 
 struct GLFWwindow;
 struct ImFont;
@@ -105,6 +109,7 @@ private:
     void ClearAllResults();
 
     void DrawLogView();
+    void DrawConsoleInput();
     void DrawSystemInfoView();
     void DrawAppInfoView();
     void DrawSettingsView();
@@ -138,8 +143,34 @@ private:
     void StartRamBenchmark();
     void StartGpuBenchmark();
     void StartSsdBenchmark();
+    // Everything that's currently runnable (CPU, RAM, disk if a drive is
+    // usable, GPU if supported), each with its tab's saved settings. Used
+    // by the console's "run all". The GPU part waits for the queued
+    // CPU/RAM/disk jobs to finish so they don't disturb each other.
+    void StartEverything();
+
+    // Whether the Disk tab's current selection could be run right now, and
+    // if not, a short reason. Shared by the tab's Run button and the console.
+    bool CanStartSsd(std::string* whyNot) const;
+    // Bytes of free space the current Disk settings need on the target drive.
+    unsigned long long SsdRequiredBytes() const;
 
     void PollManager();
+    void IngestLogEntries();
+    // Cancels the worker queue, any running GPU run, and a pending "run all" GPU step.
+    void CancelEverything();
+
+    // ---- Startup / inventory logging ----
+    void LogHardwareSummary() const;
+
+    // ---- Console (typed commands in the Log view) ----
+    void ExecuteCommand(const std::string& line);
+    void ConsolePrint(const char* fmt, ...) BRAZEN_PRINTF_LIKE(2, 3);
+    void PrintSystemSummary();
+    void PrintDrives();
+    void PrintResults();
+    void PrintStatus();
+    static int ConsoleInputCallback(ImGuiInputTextCallbackData* data);
     void AddResultEntry(const BenchmarkResult& result);
 
     BenchmarkManager m_manager;
@@ -154,6 +185,7 @@ private:
     std::vector<DriveInfo> m_allDrives;
 
     SidebarView m_currentView = SidebarView::Benchmarks;
+    SidebarView m_lastDrawnView = SidebarView::Benchmarks;
     BenchmarkTab m_currentBenchmarkTab = BenchmarkTab::Cpu;
 
     // testIndex -> selected, indexed against TestRegistry (CPU + RAM
@@ -180,8 +212,30 @@ private:
     std::map<std::string, BenchmarkResult> m_latestSingleCore;
     std::map<std::string, BenchmarkResult> m_latestMultiCore;
 
-    std::deque<std::string> m_log;
-    static constexpr size_t kMaxLogLines = 300;
+    // One rendered log line. `text` is pre-formatted at ingest time
+    // ("12:00:01.123 INFO  [Hardware] ...") so drawing thousands of lines
+    // per frame doesn't mean formatting thousands of strings per frame.
+    struct LogLine {
+        LogLevel level = LogLevel::Info;
+        std::string text;
+    };
+    std::deque<LogLine> m_log;
+    static constexpr size_t kMaxLogLines = 3000;
+
+    // Log view state.
+    bool m_logShowInfo = true;
+    bool m_logShowWarn = true;
+    bool m_logShowError = true;
+    bool m_logJumpToBottom = true; // set when the view is opened so it lands on the newest line
+
+    // Console state.
+    char m_consoleInput[256] = {};
+    std::vector<std::string> m_commandHistory;
+    int m_historyPos = -1; // -1 = editing a fresh line; else index into m_commandHistory
+    bool m_focusConsole = false;
+    // "run all" queues CPU/RAM/disk on the worker; the GPU part is started
+    // by PollManager() once that queue has drained.
+    bool m_gpuPendingAfterQueue = false;
 
     bool m_quitRequested = false;
 
@@ -218,10 +272,12 @@ private:
         int selectedComboIndex = 0;
     } m_gpuSettings;
 
+    // No duration and no chunk size: the disk test moves a fixed amount of
+    // data and runs until that's done (see DiskIoTest), so the only size
+    // knob is how much data to use.
     struct SsdSettings {
-        float durationSeconds = 8.0f;
         CategoryRunMode mode = CategoryRunMode::SingleCoreOnly;
-        int chunkSizeIndex = 1;       // into kSsdChunkSizesMB -> default 16 MB
+        int testSizeIndex = 1;        // into kSsdTestSizesMB -> default 1 GB per direction
         bool runWrite = true;
         bool runRead = true;
         // Index into m_allDrives of the drive to benchmark; -1 until a

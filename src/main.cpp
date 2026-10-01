@@ -1,3 +1,16 @@
+// Supplied by the build (see CMakeLists.txt); fallback for IDE builds.
+#ifndef BRAZEN_VERSION
+#define BRAZEN_VERSION "0.0.0-dev"
+#endif
+
+#if defined(_WIN32)
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #include <windows.h>
+#endif
+
+#include "core/Log.h"
 #include "ui/BrazenApp.h"
 #include "gpu/GpuTestRunner.h"
 
@@ -6,16 +19,33 @@
 #include <backends/imgui_impl_opengl3.h>
 #include <GLFW/glfw3.h>
 
+// Not in the GL 1.1 headers Windows ships, so define it if the platform header lacks it.
+#ifndef GL_SHADING_LANGUAGE_VERSION
+#define GL_SHADING_LANGUAGE_VERSION 0x8B8C
+#endif
+
 #include <cstdio>
 
 static void GlfwErrorCallback(int error, const char* description) {
-    fprintf(stderr, "GLFW error %d: %s\n", error, description);
+    brazen::LogError("GLFW", "Error %d: %s", error, description);
 }
 
 int main() {
+#if defined(_WIN32)
+    // Brazen.exe is a GUI-subsystem program, so Windows doesn't open a
+    // console window next to it (everything of note is in the app's own
+    // Log & Console view instead). If it was started from an existing
+    // terminal, reattach to that terminal so the log is also echoed there,
+    // which is handy for development. Double-clicking does nothing extra.
+    if (AttachConsole(ATTACH_PARENT_PROCESS))
+        std::freopen("CONOUT$", "w", stderr);
+#endif
+
+    brazen::LogInfo("App", "Brazen %s starting.", BRAZEN_VERSION);
     glfwSetErrorCallback(GlfwErrorCallback);
+    brazen::LogInfo("Init", "Starting windowing library (%s).", glfwGetVersionString());
     if (!glfwInit()) {
-        fprintf(stderr, "Failed to initialize GLFW\n");
+        brazen::LogError("Init", "Failed to initialize GLFW. Is a display available?");
         return 1;
     }
 
@@ -34,18 +64,30 @@ int main() {
 
     GLFWwindow* window = glfwCreateWindow(1360, 840, "Brazen Benchmark", nullptr, nullptr);
     if (!window) {
-        fprintf(stderr, "Failed to create GLFW window\n");
+        brazen::LogError("Init", "Failed to create the window / OpenGL 3.3 core context. "
+                                 "This machine's graphics driver may not support OpenGL 3.3.");
         glfwTerminate();
         return 1;
     }
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1); // vsync
 
+    {
+        auto glString = [](GLenum name) {
+            const unsigned char* str = glGetString(name);
+            return str ? reinterpret_cast<const char*>(str) : "unknown";
+        };
+        brazen::LogInfo("Init", "OpenGL context created: version %s, GLSL %s.", glString(GL_VERSION),
+                        glString(GL_SHADING_LANGUAGE_VERSION));
+        brazen::LogInfo("Init", "OpenGL renderer: %s (vendor: %s).", glString(GL_RENDERER), glString(GL_VENDOR));
+    }
+
     // Pick up the monitor's content scale (e.g. 2.0 on a Retina/4K display
     // at 200%) so text and controls aren't tiny on high-DPI screens.
     float dpiScaleX = 1.0f, dpiScaleY = 1.0f;
     glfwGetWindowContentScale(window, &dpiScaleX, &dpiScaleY);
     float dpiScale = dpiScaleX;
+    brazen::LogInfo("Init", "Display content scale: %.2fx.", dpiScale);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -83,12 +125,11 @@ int main() {
     // support fails (e.g. a GPU/driver without real OpenGL 3.3 core
     // support), IsSupported() reports false and BrazenApp shows the GPU
     // test as unavailable with the reason, rather than crashing.
+    brazen::LogInfo("GPU", "Setting up the GPU benchmark (compiling shaders)...");
     brazen::GpuTestRunner gpuRunner;
-    if (!gpuRunner.Init(reinterpret_cast<brazen::GLGetProcAddressFn>(glfwGetProcAddress))) {
-        fprintf(stderr, "GPU test unavailable: %s\n", gpuRunner.GetError().c_str());
-    } else {
-        fprintf(stderr, "GPU test ready.\n");
-    }
+    gpuRunner.Init(reinterpret_cast<brazen::GLGetProcAddressFn>(glfwGetProcAddress));
+    // The outcome (ready, or why it's unavailable) is logged by
+    // BrazenApp::SetGpuRunner() below.
 
     brazen::BrazenApp app;
     app.SetTitleFont(titleFont);
@@ -129,6 +170,7 @@ int main() {
         glfwSwapBuffers(window);
     }
 
+    brazen::LogInfo("App", "Shutting down.");
     gpuRunner.Shutdown();
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
