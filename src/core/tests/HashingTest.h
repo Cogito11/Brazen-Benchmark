@@ -26,6 +26,7 @@ public:
     }
 
     uint64_t RunWorkChunk() override {
+        if (m_buffer.size() != kBufferBytes) Setup(); // defensive; the runner calls Setup() first
         uint64_t hash = 1469598103934665603ull;
         const unsigned char* data = m_buffer.data();
         for (size_t i = 0; i < kBufferBytes; ++i) {
@@ -36,7 +37,16 @@ public:
         return kBufferBytes; // bytes processed this chunk
     }
 
+    // Verification hook (not used while timing): XOR of every pass's hash.
+    // After exactly one pass it equals the FNV-1a-64 hash of the buffer.
+    uint64_t Checksum() const { return m_lastHash; }
+
     // Report throughput in MB/s rather than generic ops/s.
+    //
+    // Note: this divides by 1024*1024 (MiB/s) while the RAM and disk tests
+    // report decimal MB/s. It is kept as is because the composite-score
+    // baseline in ScoreCalculator.h was measured with this definition;
+    // changing it would silently shift every Hashing score.
     double ComputeScore(uint64_t totalOps, double elapsedSeconds) const override {
         if (elapsedSeconds <= 0.0) return 0.0;
         double bytesPerSec = static_cast<double>(totalOps) / elapsedSeconds;

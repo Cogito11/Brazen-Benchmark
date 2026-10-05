@@ -152,6 +152,19 @@ private:
     // Whether the Disk tab's current selection could be run right now, and
     // if not, a short reason. Shared by the tab's Run button and the console.
     bool CanStartSsd(std::string* whyNot) const;
+
+    // RAM test safety. The multi-core run allocates 2 buffers per thread,
+    // so a large buffer on many threads can need many GB. Exceeding free
+    // memory doesn't give a clean error: Linux over-commits and then the
+    // OOM killer ends the process, Windows starts paging until the machine
+    // crawls. These size the run and refuse one that wouldn't fit.
+    unsigned RamPlannedThreads() const;
+    unsigned long long RamRequiredBytes() const;
+    // Largest allocation the RAM test may use right now (a share of
+    // *available* memory; of installed memory if availability is unknown).
+    // 0 = unknown, i.e. nothing to compare against.
+    unsigned long long RamBudgetBytes() const;
+    bool CanStartRam(std::string* whyNot) const;
     // Bytes of free space the current Disk settings need on the target drive.
     unsigned long long SsdRequiredBytes() const;
 

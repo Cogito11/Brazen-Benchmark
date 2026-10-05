@@ -31,7 +31,10 @@ public:
 
     const std::vector<std::unique_ptr<IBenchmarkTest>>& Samples() const { return m_samples; }
 
+    // Returns nullptr for an index that isn't registered (a stale or
+    // out-of-range index must never become an out-of-bounds read).
     std::unique_ptr<IBenchmarkTest> Create(size_t index) const {
+        if (index >= m_factories.size()) return nullptr;
         return m_factories[index]();
     }
 

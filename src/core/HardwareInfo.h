@@ -278,6 +278,72 @@ inline unsigned long long QueryTotalRamBytes() {
 #endif
 }
 
+#if !defined(_WIN32) && !defined(__APPLE__)
+// Reads one unsigned number from a cgroup control file. Returns 0 if the
+// file is missing/unreadable and ~0 for the literal "max" (unlimited).
+inline unsigned long long ReadCgroupNumber(const char* path) {
+    std::ifstream file(path);
+    std::string text;
+    if (!(file >> text)) return 0;
+    if (text == "max") return ~0ull;
+    char* end = nullptr;
+    unsigned long long value = std::strtoull(text.c_str(), &end, 10);
+    return end == text.c_str() ? 0 : value;
+}
+#endif
+
+// Best-effort *currently available* RAM in bytes, i.e. what a new
+// allocation can use without pushing the machine into swap or the OOM
+// killer. Returns 0 if it can't be determined (callers should then fall
+// back to a share of total RAM).
+//   Windows: GlobalMemoryStatusEx's available physical memory.
+//   Linux:   MemAvailable, further limited by a container (cgroup) memory
+//            limit when one applies; /proc/meminfo alone ignores those, and
+//            exceeding one gets the process killed.
+//   macOS:   not determined (returns 0).
+inline unsigned long long QueryAvailableRamBytes() {
+#if defined(_WIN32)
+    MEMORYSTATUSEX status;
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status))
+        return static_cast<unsigned long long>(status.ullAvailPhys);
+    return 0;
+#elif defined(__APPLE__)
+    return 0;
+#else
+    unsigned long long available = 0;
+    {
+        std::ifstream file("/proc/meminfo");
+        std::string line;
+        while (std::getline(file, line)) {
+            if (line.rfind("MemAvailable:", 0) == 0) {
+                auto pos = line.find_first_of("0123456789");
+                if (pos != std::string::npos)
+                    available = static_cast<unsigned long long>(std::atoll(line.c_str() + pos)) * 1024ull;
+                break;
+            }
+        }
+    }
+    auto limitTo = [&](unsigned long long headroom) {
+        available = available == 0 ? headroom : (headroom < available ? headroom : available);
+    };
+    // cgroup v2
+    unsigned long long limit = ReadCgroupNumber("/sys/fs/cgroup/memory.max");
+    if (limit != 0 && limit != ~0ull) {
+        unsigned long long used = ReadCgroupNumber("/sys/fs/cgroup/memory.current");
+        if (used != ~0ull) limitTo(limit > used ? limit - used : 0);
+    } else if (limit == 0) {
+        // cgroup v1; "no limit" shows up as an enormous sentinel value.
+        unsigned long long limitV1 = ReadCgroupNumber("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+        if (limitV1 != 0 && limitV1 < (1ull << 60)) {
+            unsigned long long usedV1 = ReadCgroupNumber("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+            limitTo(limitV1 > usedV1 ? limitV1 - usedV1 : 0);
+        }
+    }
+    return available;
+#endif
+}
+
 // Best-effort motherboard vendor/model. Windows reads it from
 // HKLM\HARDWARE\DESCRIPTION\System\BIOS (BaseBoardManufacturer/
 // BaseBoardProduct) rather than WMI; Linux and macOS have their own

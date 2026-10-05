@@ -10,6 +10,16 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Developer option: build everything with sanitizers, e.g.
+#   cmake -B build-asan -DBRAZEN_SANITIZE=address,undefined
+#   cmake -B build-tsan -DBRAZEN_SANITIZE=thread
+# (GCC/Clang only; address and thread can't be combined.)
+set(BRAZEN_SANITIZE "" CACHE STRING "Comma-separated -fsanitize= list (GCC/Clang), empty for none")
+if(BRAZEN_SANITIZE AND NOT MSVC)
+    add_compile_options(-fsanitize=${BRAZEN_SANITIZE} -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=${BRAZEN_SANITIZE})
+endif()
+
 # Version string baked into the binary (shown on the App Info screen).
 # The tracked default lives in cmake/BrazenVersion.cmake. CI can override it
 # with -DBRAZEN_VERSION: stable releases use the pushed tag, while rolling
@@ -139,4 +149,18 @@ if(BRAZEN_BUILD_CORE_TEST)
     add_executable(BrazenCoreTest src/core_test_main.cpp)
     target_include_directories(BrazenCoreTest PRIVATE src)
     target_link_libraries(BrazenCoreTest PRIVATE Threads::Threads)
+endif()
+
+# ---- Self-test suite ----
+# Dependency-free regression tests for the engine (runner, manager, CPU/RAM/
+# disk tests, thread affinity). No GUI or OpenGL needed. Run with `ctest`
+# or directly: build/BrazenSelfTest [--list] [test_name ...]
+option(BRAZEN_BUILD_TESTS "Build and register the BrazenSelfTest suite" ON)
+if(BRAZEN_BUILD_TESTS)
+    enable_testing()
+    add_executable(BrazenSelfTest tests/SelfTest.cpp)
+    target_include_directories(BrazenSelfTest PRIVATE src)
+    target_link_libraries(BrazenSelfTest PRIVATE Threads::Threads)
+    add_test(NAME BrazenSelfTest COMMAND BrazenSelfTest)
+    set_tests_properties(BrazenSelfTest PROPERTIES TIMEOUT 600)
 endif()

@@ -23,6 +23,7 @@ public:
     }
 
     uint64_t RunWorkChunk() override {
+        if (m_data.size() != kElements) Setup(); // defensive; the runner calls Setup() first
         for (auto& v : m_data) {
             m_rngState = m_rngState * 1103515245u + 12345u;
             v = static_cast<int>(m_rngState >> 8);
@@ -34,6 +35,9 @@ public:
     std::unique_ptr<IBenchmarkTest> Clone() const override {
         return std::make_unique<SortingTest>(*this);
     }
+
+    // Verification hook (not used while timing): the data as of the last pass.
+    const std::vector<int>& Data() const { return m_data; }
 
 private:
     static constexpr size_t kElements = 200'000;

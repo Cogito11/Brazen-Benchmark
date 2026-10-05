@@ -36,6 +36,12 @@ public:
         return std::make_unique<FloatMathTest>(*this);
     }
 
+    // Verification hooks: the accumulator must stay finite (a NaN/inf here
+    // would mean the loop is no longer doing the intended arithmetic) and
+    // be reproducible between identical instances.
+    double Accumulator() const { return m_acc; }
+    double Position() const { return m_x; }
+
 private:
     double m_x = 0.1;
     double m_acc = 0.0;

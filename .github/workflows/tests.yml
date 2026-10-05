@@ -1,0 +1,54 @@
+name: Tests
+
+# Runs the engine self-tests (tests/SelfTest.cpp) on every push and pull
+# request: once normally on each platform, and on Linux under the address,
+# undefined-behavior and thread sanitizers, which is where crashes, memory
+# errors and data races in the benchmark engine show up.
+on:
+  push:
+  pull_request:
+
+jobs:
+  self-test:
+    name: Self-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build xorg-dev libgl1-mesa-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build self-test
+        run: cmake --build build --config Release --target BrazenSelfTest --parallel
+      - name: Run self-test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  sanitizers:
+    name: Self-test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan + UBSan
+            sanitize: address,undefined
+          - name: TSan
+            sanitize: thread
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build xorg-dev libgl1-mesa-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBRAZEN_SANITIZE=${{ matrix.sanitize }}
+      - name: Build self-test
+        run: cmake --build build --target BrazenSelfTest --parallel
+      - name: Run self-test
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build --output-on-failure

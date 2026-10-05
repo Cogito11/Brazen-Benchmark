@@ -66,6 +66,13 @@ private:
     enum class State { Idle, Calibrating, Running };
 
     void FinalizeResult(BenchmarkResult* outResult, bool cancelled);
+    // Ends the whole run (remaining workloads are skipped) and reports the
+    // current workload as failed with `reason`.
+    void FailRun(BenchmarkResult* outResult, const std::string& reason);
+    // Finds the per-chunk iteration count for the current workload and
+    // decides which clock to trust. Returns false (with *error) if the GPU
+    // is unusable at the current resolution.
+    bool Calibrate(std::string* error);
     void BeginWorkload();
     const char* WorkloadName() const;
 
@@ -79,6 +86,7 @@ private:
     bool m_cancelRequested = false;
     double m_requestedDuration = 5.0;
     int m_iterationsPerDraw = 200; // set by calibration at the start of each run
+    bool m_useGpuTimer = false;    // calibration found the timer query trustworthy for this workload
     double m_elapsedSeconds = 0.0;
     uint64_t m_totalOps = 0;
     int m_workloadIndex = 0;

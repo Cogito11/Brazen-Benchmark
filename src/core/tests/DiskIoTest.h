@@ -3,6 +3,7 @@
 #include "../Log.h"
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -361,6 +362,17 @@ public:
     // or stalled that the work takes longer than this, the run stops and
     // reports what it managed.
     static constexpr double kSafetyLimitSeconds = 300.0;
+    // Upper bound on the data one run will ever move per file. Bigger
+    // requests are clamped (and would anyway be refused by the free-space
+    // check), which also keeps the block-rounding arithmetic far from overflow.
+    static constexpr uint64_t kMaxTotalBytes = 1024ull * 1024 * 1024 * 1024; // 1 TB
+    // Always leave at least this much free on the drive being tested.
+    static constexpr uint64_t kFreeSpaceReserveBytes = 512ull * 1024 * 1024;
+    // Temp files older than this are assumed to be leftovers from a run that
+    // crashed or lost power, and are removed before the next run. It must
+    // comfortably exceed the longest a live file can sit untouched
+    // (the safety limit above plus preparation time).
+    static constexpr int kStaleFileMinutes = 15;
 
     explicit DiskIoTest(std::filesystem::path targetDir, DiskIoMode mode,
                         uint64_t totalBytes = kDefaultTotalBytes)
@@ -392,8 +404,16 @@ public:
         }
         FillWithIncompressibleData();
 
+        if (!m_shared->cleanedStale.exchange(true)) RemoveStaleTestFiles(m_targetDir);
+
         std::string err;
         if (m_mode == DiskIoMode::Write) {
+            // Re-check free space now, not only when the run was queued:
+            // other programs (or earlier jobs) may have used it since, and
+            // filling a drive completely can destabilise the system. All
+            // writers of this job account for their file together.
+            uint64_t committed = m_shared->spaceReserved.fetch_add(m_totalBytes) + m_totalBytes;
+            if (!HasRoomFor(committed)) return;
             m_path = disk_detail::MakeUniqueTestPath(m_targetDir);
             if (m_path.empty()) {
                 Fail("Couldn't pick an unused temporary file name in " + m_targetDir.string());
@@ -574,6 +594,8 @@ private:
         std::atomic<bool> failed{false};
         std::atomic<bool> anyBuffered{false};   // some handle couldn't bypass the OS cache
         std::atomic<bool> announced{false};     // one-time "here's how this run works" log line
+        std::atomic<bool> cleanedStale{false};  // leftover-file sweep done for this job
+        std::atomic<uint64_t> spaceReserved{0}; // bytes of temp files all writers will create
 
         std::mutex mutex; // guards `error` and the read-fixture fields below
         std::string error;
@@ -589,6 +611,7 @@ private:
 
     static uint64_t RoundToBlocks(uint64_t bytes) {
         if (bytes < kIoBlockBytes) bytes = kIoBlockBytes;
+        if (bytes > kMaxTotalBytes) bytes = kMaxTotalBytes;
         return ((bytes + kIoBlockBytes - 1) / kIoBlockBytes) * kIoBlockBytes;
     }
 
@@ -629,6 +652,7 @@ private:
         if (m_shared->fixtureAttempted || m_shared->failed.load()) return false;
         m_shared->fixtureAttempted = true;
 
+        if (!HasRoomForLocked(m_totalBytes)) return false;
         std::filesystem::path path = disk_detail::MakeUniqueTestPath(m_targetDir);
         if (path.empty()) {
             FailLocked("Couldn't pick an unused temporary file name in " + m_targetDir.string());
@@ -665,6 +689,59 @@ private:
         m_shared->fixtureReady = true;
         LogInfo("Disk", "Test file ready; starting the timed read.");
         return true;
+    }
+
+    // True if the target drive can hold `bytesNeeded` of temp files plus
+    // the safety reserve; otherwise records a failure and returns false. If
+    // the OS can't report free space we don't block the run, since a real
+    // out-of-space condition is still caught (and reported) while writing.
+    bool HasRoomFor(uint64_t bytesNeeded) {
+        std::lock_guard<std::mutex> lock(m_shared->mutex);
+        return HasRoomForLocked(bytesNeeded);
+    }
+
+    bool HasRoomForLocked(uint64_t bytesNeeded) {
+        std::error_code ec;
+        std::filesystem::space_info info = std::filesystem::space(m_targetDir, ec);
+        if (ec) return true;
+        const uint64_t available = static_cast<uint64_t>(info.available);
+        if (bytesNeeded > available || available - bytesNeeded < kFreeSpaceReserveBytes) {
+            FailLocked("Not enough free space on " + m_targetDir.string() + ": the test needs " +
+                       std::to_string(bytesNeeded / (1024 * 1024)) + " MB plus a " +
+                       std::to_string(kFreeSpaceReserveBytes / (1024 * 1024)) + " MB safety reserve, but only " +
+                       std::to_string(available / (1024 * 1024)) + " MB is free.");
+            return false;
+        }
+        return true;
+    }
+
+    // Deletes test files left behind by a run that crashed, was killed or
+    // lost power. Only files that follow our naming pattern *and* haven't
+    // been touched for kStaleFileMinutes are removed, so a second Brazen
+    // instance working in the same folder is never disturbed.
+    static void RemoveStaleTestFiles(const std::filesystem::path& dir) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec);
+        if (ec) return;
+        const auto cutoff = fs::file_time_type::clock::now() - std::chrono::minutes(kStaleFileMinutes);
+        int removed = 0;
+        for (fs::directory_iterator end; it != end; it.increment(ec)) {
+            if (ec) break;
+            std::error_code fileEc;
+            const fs::path& p = it->path();
+            const std::string name = p.filename().string();
+            const bool ours = (name.rfind("brazen_disktest_", 0) == 0 && name.size() > 4 &&
+                               name.compare(name.size() - 4, 4, ".tmp") == 0) ||
+                              (name.rfind(".brazen_write_probe_", 0) == 0);
+            if (!ours || !it->is_regular_file(fileEc) || fileEc) continue;
+            auto written = fs::last_write_time(p, fileEc);
+            if (fileEc || written > cutoff) continue;
+            if (fs::remove(p, fileEc) && !fileEc) ++removed;
+        }
+        if (removed > 0)
+            LogInfo("Disk", "Removed %d leftover test file%s from an earlier run in %s.", removed,
+                    removed == 1 ? "" : "s", dir.string().c_str());
     }
 
     // Same as Fail(), for callers that already hold m_shared->mutex.

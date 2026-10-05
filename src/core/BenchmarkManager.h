@@ -57,8 +57,17 @@ public:
     }
 
     ~BenchmarkManager() {
-        m_stop.store(true);
-        m_cancelCurrent.store(true);
+        {
+            // The stop flag must change under the same mutex the worker
+            // holds while checking its wait predicate. Setting it outside
+            // the lock allows a lost wake-up: the worker checks the
+            // predicate (false), we set the flag and notify, and only then
+            // does the worker start waiting, so it sleeps forever and the
+            // join below never returns.
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            m_stop.store(true);
+            m_cancelCurrent.store(true);
+        }
         m_cv.notify_all();
         if (m_worker.joinable()) m_worker.join();
     }
@@ -67,6 +76,12 @@ public:
     // RamBandwidthTest constructed with a non-default buffer size).
     void Enqueue(std::shared_ptr<IBenchmarkTest> prototype, RunMode mode,
                  double durationSeconds, unsigned threadCountOverride = 0) {
+        if (!prototype) {
+            // A job with nothing to run must never be counted as pending,
+            // or IsIdle() would never become true again.
+            LogWarn("Run", "Ignored a request to run a test that doesn't exist.");
+            return;
+        }
         {
             std::lock_guard<std::mutex> lock(m_queueMutex);
             m_queue.push_back({std::move(prototype), mode, durationSeconds, threadCountOverride});
@@ -78,6 +93,8 @@ public:
     // Convenience overload: run a registered test with its default
     // configuration (what TestRegistry's factory produces).
     void Enqueue(size_t testIndex, RunMode mode, double durationSeconds, unsigned threadCountOverride = 0) {
+        // Create() returns nullptr for an unknown index; the overload above
+        // then logs and ignores it.
         Enqueue(std::shared_ptr<IBenchmarkTest>(TestRegistry::Instance().Create(testIndex)),
                 mode, durationSeconds, threadCountOverride);
     }
@@ -207,15 +224,54 @@ private:
                     m_cancelCurrent.store(false);
                 }
             }
-            if (!haveJob || !job.prototype) continue;
+            if (!haveJob) continue;
+            if (!job.prototype) { // can't happen via Enqueue(), but never leak the pending count
+                m_pendingJobs.fetch_sub(1);
+                continue;
+            }
+            try {
+                RunJob(job);
+            } catch (...) {
+                // Last resort (e.g. out of memory while building an error
+                // message). RunJob's scope guard has already done the
+                // bookkeeping; keep the worker alive for the next job.
+            }
+        }
+    }
 
+    // Runs one job to completion and publishes its result. Nothing in
+    // here is allowed to leave this function by throwing: an exception
+    // escaping the worker thread would terminate the whole process, and
+    // skipping the bookkeeping would leave the manager "busy" forever.
+    void RunJob(QueuedRun& job) {
+        // Bookkeeping that must happen however this function exits.
+        struct JobScope {
+            BenchmarkManager& m;
+            explicit JobScope(BenchmarkManager& mgr) : m(mgr) {}
+            ~JobScope() {
+                {
+                    std::lock_guard<std::mutex> lock(m.m_stateMutex);
+                    m.m_currentTestName.clear();
+                    m.m_currentPrototype.reset();
+                }
+                m.m_busy.store(false);
+                m.m_pendingJobs.fetch_sub(1); // after the result is published (see below)
+            }
+        };
+
+        JobScope scope(*this); // destroyed last, i.e. after the result below is published
+
+        std::string name = "Unknown test";
+        BenchmarkResult result;
+        try {
             IBenchmarkTest& test = *job.prototype;
+            name = test.GetName();
             const bool fixedWork = test.RunsToCompletion();
             const char* modeLabel = job.mode == RunMode::SingleCore ? "single-core" : "multi-core";
 
             {
                 std::lock_guard<std::mutex> lock(m_stateMutex);
-                m_currentTestName = test.GetName();
+                m_currentTestName = name;
                 m_currentJobDuration = job.durationSeconds;
                 m_currentFixedWork = fixedWork;
                 m_currentPrototype = job.prototype;
@@ -224,51 +280,62 @@ private:
             m_busy.store(true);
             if (fixedWork) {
                 LogInfo("Run", "Starting %s (%s). This test runs until its work is done, so the time it takes depends on your hardware.",
-                        test.GetName().c_str(), modeLabel);
+                        name.c_str(), modeLabel);
             } else if (job.mode == RunMode::MultiCore && job.threadCountOverride > 0) {
-                LogInfo("Run", "Starting %s (%s, %u threads, %.0f s)...", test.GetName().c_str(),
-                        modeLabel, job.threadCountOverride, job.durationSeconds);
+                LogInfo("Run", "Starting %s (%s, %u threads, %.0f s)...", name.c_str(), modeLabel,
+                        job.threadCountOverride, job.durationSeconds);
             } else {
-                LogInfo("Run", "Starting %s (%s, %.0f s)...", test.GetName().c_str(), modeLabel,
-                        job.durationSeconds);
+                LogInfo("Run", "Starting %s (%s, %.0f s)...", name.c_str(), modeLabel, job.durationSeconds);
             }
 
-            BenchmarkResult result = (job.mode == RunMode::SingleCore)
+            result = (job.mode == RunMode::SingleCore)
                 ? BenchmarkRunner::RunSingleCore(test, job.durationSeconds, &m_cancelCurrent)
                 : BenchmarkRunner::RunMultiCore(test, job.durationSeconds, job.threadCountOverride, &m_cancelCurrent);
 
             // Log the outcome *before* publishing the result, so the log
             // never lags behind what the Results tab shows.
             if (result.failed) {
-                LogError("Run", "%s failed: %s", test.GetName().c_str(),
+                LogError("Run", "%s failed: %s", name.c_str(),
                          result.notes.empty() ? "unknown error" : result.notes.c_str());
             } else if (result.cancelled) {
-                LogInfo("Run", "%s cancelled after %.1f s.", test.GetName().c_str(), result.elapsedSeconds);
+                LogInfo("Run", "%s cancelled after %.1f s.", name.c_str(), result.elapsedSeconds);
             } else {
-                LogInfo("Run", "%s finished in %.1f s: %s", test.GetName().c_str(),
-                        result.elapsedSeconds, FormatScore(result).c_str());
+                LogInfo("Run", "%s finished in %.1f s: %s", name.c_str(), result.elapsedSeconds,
+                        FormatScore(result).c_str());
                 if (!result.notes.empty())
-                    LogInfo("Run", "%s: %s", test.GetName().c_str(), result.notes.c_str());
-                if (fixedWork && test.GetProgress().fraction >= 0.0 && test.GetProgress().fraction < 0.999)
-                    LogWarn("Run", "%s hit its safety time limit (%.0f s) before finishing; the score reflects the part that completed.",
-                            test.GetName().c_str(), job.durationSeconds);
+                    LogInfo("Run", "%s: %s", name.c_str(), result.notes.c_str());
+                if (fixedWork) {
+                    TestProgress progress = test.GetProgress();
+                    if (progress.fraction >= 0.0 && progress.fraction < 0.999)
+                        LogWarn("Run", "%s hit its safety time limit (%.0f s) before finishing; the score reflects the part that completed.",
+                                name.c_str(), job.durationSeconds);
+                }
                 if (!result.affinityPinned && result.mode != RunMode::Gpu)
                     LogWarn("Run", "%s: the OS refused to pin threads to cores, so this score may carry some scheduler noise.",
-                            test.GetName().c_str());
+                            name.c_str());
             }
+        } catch (const std::exception& e) {
+            result = BenchmarkResult();
+            result.testName = name;
+            result.mode = job.mode;
+            result.failed = true;
+            result.notes = std::string("Unexpected error: ") + e.what();
+            LogError("Run", "%s failed: %s", name.c_str(), result.notes.c_str());
+        } catch (...) {
+            result = BenchmarkResult();
+            result.testName = name;
+            result.mode = job.mode;
+            result.failed = true;
+            result.notes = "Unexpected error.";
+            LogError("Run", "%s failed: %s", name.c_str(), result.notes.c_str());
+        }
 
-            {
-                std::lock_guard<std::mutex> lock(m_resultsMutex);
-                m_results.push_back(result);
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(m_stateMutex);
-                m_currentTestName.clear();
-                m_currentPrototype.reset();
-            }
-            m_busy.store(false);
-            m_pendingJobs.fetch_sub(1);
+        try {
+            std::lock_guard<std::mutex> lock(m_resultsMutex);
+            m_results.push_back(std::move(result));
+        } catch (...) {
+            // Out of memory while publishing: nothing more can be done, but
+            // the bookkeeping in `scope` must still run and the thread must live.
         }
     }
 

@@ -1,4 +1,6 @@
 #include "GpuComputeTest.h"
+#include <chrono>
+#include <cstdio>
 #include <vector>
 
 namespace brazen {
@@ -54,6 +56,20 @@ void main() {
     FragColor = vec4(fract(acc), fract(acc * 0.5), fract(acc * 0.25), 1.0);
 }
 )GLSL";
+
+// Discards any GL errors left over from earlier calls (e.g. by another
+// part of the app) so that an error seen after our own work is really ours.
+void ClearGlErrors() {
+    if (!gl.GetError) return;
+    for (int i = 0; i < 16 && gl.GetError() != GL_NO_ERROR_; ++i) {}
+}
+
+std::string DescribeGlError(GLenum error) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "OpenGL error 0x%04X%s", static_cast<unsigned>(error),
+                  error == GL_OUT_OF_MEMORY_ ? " (out of memory)" : "");
+    return buf;
+}
 
 bool CompileShader(GLenum type, const char* source, GLuint* outShader, std::string* err) {
     GLuint shader = gl.CreateShader(type);
@@ -176,13 +192,32 @@ bool GpuComputeTest::CreateFramebuffer(int width, int height, std::string* error
     // framebuffer, so this test never touches what's actually on screen;
     // RunDraw() restores framebuffer 0 before returning so ImGui's own
     // rendering later in the frame is completely unaffected.
+    GLint maxSize = 1024; // the minimum a GL 3.3 driver must support
+    if (gl.GetIntegerv) gl.GetIntegerv(GL_MAX_TEXTURE_SIZE_, &maxSize);
+    int limit = maxSize < kMaxTargetSize ? static_cast<int>(maxSize) : kMaxTargetSize;
+    if (width < kMinTargetSize || height < kMinTargetSize || width > limit || height > limit) {
+        if (errorOut)
+            *errorOut = "Render target size " + std::to_string(width) + "x" + std::to_string(height) +
+                        " is outside the supported range (" + std::to_string(kMinTargetSize) + " to " +
+                        std::to_string(limit) + " pixels per side on this GPU).";
+        return false;
+    }
+
+    ClearGlErrors();
     GLuint texture = 0, fbo = 0;
     gl.GenTextures(1, &texture);
     gl.BindTexture(GL_TEXTURE_2D_, texture);
     gl.TexImage2D(GL_TEXTURE_2D_, 0, static_cast<GLint>(GL_RGBA8_), width, height, 0,
                   GL_RGBA_, GL_UNSIGNED_BYTE_, nullptr);
+    GLenum allocError = gl.GetError ? gl.GetError() : GL_NO_ERROR_;
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MIN_FILTER_, static_cast<GLint>(GL_NEAREST_));
     gl.TexParameteri(GL_TEXTURE_2D_, GL_TEXTURE_MAG_FILTER_, static_cast<GLint>(GL_NEAREST_));
+    if (allocError != GL_NO_ERROR_) {
+        gl.BindTexture(GL_TEXTURE_2D_, 0);
+        gl.DeleteTextures(1, &texture);
+        if (errorOut) *errorOut = "Couldn't allocate the render target: " + DescribeGlError(allocError);
+        return false;
+    }
 
     gl.GenFramebuffers(1, &fbo);
     gl.BindFramebuffer(GL_FRAMEBUFFER_, fbo);
@@ -228,8 +263,16 @@ bool GpuComputeTest::SetResolution(int width, int height, std::string* errorOut)
     return true;
 }
 
-double GpuComputeTest::RunDraw(int iterations) {
-    if (!m_initialized) return 0.0;
+GpuComputeTest::DrawTiming GpuComputeTest::RunDraw(int iterations) {
+    using clock = std::chrono::steady_clock;
+    DrawTiming out;
+    if (!m_initialized) {
+        out.ok = false;
+        out.error = "The GPU test isn't initialized.";
+        return out;
+    }
+    if (iterations < 1) iterations = 1;
+    ClearGlErrors();
 
     gl.BindFramebuffer(GL_FRAMEBUFFER_, m_fbo);
     gl.Viewport(0, 0, m_width, m_height);
@@ -238,28 +281,39 @@ double GpuComputeTest::RunDraw(int iterations) {
     if (m_uniformWorkload >= 0) gl.Uniform1i(m_uniformWorkload, static_cast<int>(m_workload));
     if (m_uniformSource >= 0) gl.Uniform1i(m_uniformSource, 0);
     gl.BindTexture(GL_TEXTURE_2D_, m_sourceTexture);
-    if (m_query) gl.BeginQuery(GL_TIME_ELAPSED_, m_query);
     gl.BindVertexArray(m_vao);
-    gl.DrawArrays(GL_TRIANGLE_STRIP_, 0, 4);
-    gl.BindVertexArray(0);
+
+    // Fill rate: the shader is deliberately trivial, so one draw finishes in
+    // microseconds -- shorter than the timer query's own resolution/latency.
+    // Issue `iterations` full-target draws inside one timed region instead.
+    const int draws = (m_workload == Workload::Fill) ? iterations : 1;
+
+    auto start = clock::now();
+    if (m_query) gl.BeginQuery(GL_TIME_ELAPSED_, m_query);
+    for (int i = 0; i < draws; ++i) gl.DrawArrays(GL_TRIANGLE_STRIP_, 0, 4);
     if (m_query) {
         gl.EndQuery(GL_TIME_ELAPSED_);
         GLuint64 nanoseconds = 0;
         gl.GetQueryObjectui64v(m_query, GL_QUERY_RESULT_, &nanoseconds);
-        gl.BindTexture(GL_TEXTURE_2D_, 0);
-        gl.BindFramebuffer(GL_FRAMEBUFFER_, 0);
-        return static_cast<double>(nanoseconds) / 1'000'000'000.0;
+        out.gpuSeconds = static_cast<double>(nanoseconds) / 1'000'000'000.0;
     }
-
-    // Force the GPU to actually finish this draw before we return, so the
-    // caller's wall-clock measurement around RunDraw() reflects real
-    // execution time rather than just how fast the driver accepted the
-    // command (GL calls are asynchronous by default).
+    // Always wait for completion so wallSeconds covers real GPU execution
+    // (GL calls are asynchronous), even if a driver's query returns early.
     gl.Finish();
+    out.wallSeconds = std::chrono::duration<double>(clock::now() - start).count();
 
+    gl.BindVertexArray(0);
     gl.BindTexture(GL_TEXTURE_2D_, 0);
     gl.BindFramebuffer(GL_FRAMEBUFFER_, 0);
-    return 0.0;
+
+    // A failed draw "completes" instantly and would otherwise be scored as
+    // an absurdly fast GPU, so a GL error invalidates the measurement.
+    GLenum error = gl.GetError ? gl.GetError() : GL_NO_ERROR_;
+    if (error != GL_NO_ERROR_) {
+        out.ok = false;
+        out.error = DescribeGlError(error) + " while rendering";
+    }
+    return out;
 }
 
 void GpuComputeTest::Shutdown() {

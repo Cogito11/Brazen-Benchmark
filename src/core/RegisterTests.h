@@ -1,5 +1,6 @@
 #pragma once
 #include "TestRegistry.h"
+#include <mutex>
 #include "tests/IntegerMathTest.h"
 #include "tests/FloatMathTest.h"
 #include "tests/PrimeSieveTest.h"
@@ -15,14 +16,22 @@ namespace brazen {
 // context can only be driven from one thread at a time, so it doesn't
 // fit the "clone across N worker threads" shape this registry assumes.
 // See src/gpu/GpuTestRunner.h for how GPU testing is wired up instead.
+//
+// Safe to call more than once (and from several threads): the tests are
+// registered the first time only. Registering twice would duplicate every
+// test, which silently skews the composite score's "tests total" and the
+// UI's per-test selection list.
 inline void RegisterBuiltInTests() {
-    auto& reg = TestRegistry::Instance();
-    reg.Register([] { return std::make_unique<IntegerMathTest>(); });
-    reg.Register([] { return std::make_unique<FloatMathTest>(); });
-    reg.Register([] { return std::make_unique<PrimeSieveTest>(); });
-    reg.Register([] { return std::make_unique<HashingTest>(); });
-    reg.Register([] { return std::make_unique<SortingTest>(); });
-    reg.Register([] { return std::make_unique<RamBandwidthTest>(); });
+    static std::once_flag once;
+    std::call_once(once, [] {
+        auto& reg = TestRegistry::Instance();
+        reg.Register([] { return std::make_unique<IntegerMathTest>(); });
+        reg.Register([] { return std::make_unique<FloatMathTest>(); });
+        reg.Register([] { return std::make_unique<PrimeSieveTest>(); });
+        reg.Register([] { return std::make_unique<HashingTest>(); });
+        reg.Register([] { return std::make_unique<SortingTest>(); });
+        reg.Register([] { return std::make_unique<RamBandwidthTest>(); });
+    });
 }
 
 } // namespace brazen

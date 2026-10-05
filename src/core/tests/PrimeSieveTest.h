@@ -21,6 +21,9 @@ public:
     }
 
     uint64_t RunWorkChunk() override {
+        // The runner always calls Setup() first; this keeps a missed
+        // Setup() from becoming an out-of-bounds write.
+        if (m_sieve.size() != kLimit + 1) Setup();
         std::fill(m_sieve.begin(), m_sieve.end(), true);
         m_sieve[0] = m_sieve[1] = false;
         for (size_t p = 2; p * p <= kLimit; ++p) {
@@ -40,6 +43,16 @@ public:
 
     std::unique_ptr<IBenchmarkTest> Clone() const override {
         return std::make_unique<PrimeSieveTest>(*this);
+    }
+
+    // Verification hook (not used while timing): number of primes found by
+    // the most recent pass. There are exactly 148,933 primes <= 2,000,000,
+    // so a different answer means the test is computing the wrong thing.
+    static constexpr size_t kLimitForVerification = 2'000'000;
+    uint64_t CountPrimes() const {
+        uint64_t count = 0;
+        for (size_t i = 2; i < m_sieve.size(); ++i) count += m_sieve[i] ? 1 : 0;
+        return count;
     }
 
 private:

@@ -2,6 +2,8 @@
 #include "../IBenchmarkTest.h"
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace brazen {
@@ -25,8 +27,15 @@ public:
     // as a setting (see the RAM benchmark configuration modal) rather
     // than a fixed guess, letting anyone with unusually large cache
     // deliberately size the buffer to exceed it.
+    //
+    // Sizes below kMinBytesPerArray are raised to it (a zero-length buffer
+    // would "run" forever without moving a byte). Sizes above
+    // kMaxBytesPerArray make Setup() fail with a clear message instead of
+    // trying to allocate them: on systems that over-commit memory the
+    // allocation would appear to succeed and the OS would kill the process
+    // when the buffer is touched.
     explicit RamBandwidthTest(size_t bytesPerArray = kDefaultBytesPerArray)
-        : m_bytesPerArray(bytesPerArray) {}
+        : m_bytesPerArray(bytesPerArray < kMinBytesPerArray ? kMinBytesPerArray : bytesPerArray) {}
 
     std::string GetName() const override { return "RAM Bandwidth"; }
     std::string GetDescription() const override {
@@ -36,8 +45,16 @@ public:
     std::string GetUnit() const override { return "GB/s"; }
 
     static constexpr size_t kDefaultBytesPerArray = 32ull * 1024 * 1024;
+    static constexpr size_t kMinBytesPerArray = 1ull * 1024 * 1024;
+    static constexpr size_t kMaxBytesPerArray = 4096ull * 1024 * 1024;
 
     void Setup() override {
+        if (m_bytesPerArray > kMaxBytesPerArray) {
+            throw std::runtime_error("The RAM test buffer size (" +
+                                     std::to_string(m_bytesPerArray / (1024 * 1024)) +
+                                     " MB) is larger than the supported maximum of " +
+                                     std::to_string(kMaxBytesPerArray / (1024 * 1024)) + " MB per buffer.");
+        }
         size_t elements = m_bytesPerArray / sizeof(uint64_t);
         m_src.assign(elements, 0);
         m_dst.assign(elements, 0);
@@ -49,6 +66,7 @@ public:
     }
 
     uint64_t RunWorkChunk() override {
+        if (m_src.empty()) Setup(); // defensive; the runner calls Setup() first
         // Alternate copy direction each chunk so we're not always reading
         // src's pages and writing dst's -- both buffers get exercised as
         // both source and destination over the course of a run.
@@ -75,6 +93,13 @@ public:
     // back to the default.
     std::unique_ptr<IBenchmarkTest> Clone() const override {
         return std::make_unique<RamBandwidthTest>(*this);
+    }
+
+    // Verification hook (not used while timing): after any whole number of
+    // copy passes both buffers hold the same data, and it is the non-trivial
+    // pattern written by Setup() rather than zeros.
+    bool BuffersMatchAndAreNonZero() const {
+        return !m_src.empty() && m_src == m_dst && m_src.size() > 1 && m_src[1] != 0;
     }
 
 private:

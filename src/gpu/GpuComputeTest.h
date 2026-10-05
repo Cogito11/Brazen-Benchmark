@@ -21,6 +21,11 @@ public:
     bool Init(std::string* errorOut);
     void Shutdown();
 
+    // Smallest and largest render target edge accepted by SetResolution()
+    // (the upper bound is further limited by the driver's GL_MAX_TEXTURE_SIZE).
+    static constexpr int kMinTargetSize = 16;
+    static constexpr int kMaxTargetSize = 8192;
+
     // Changes the offscreen render target size, recreating the texture
     // and framebuffer if the size actually differs from the current one.
     // Must be called after Init() and before the run currently in
@@ -36,9 +41,21 @@ public:
     void SetWorkload(Workload workload) { m_workload = workload; }
     Workload GetWorkload() const { return m_workload; }
 
-    // Runs one draw and returns GPU time in seconds when timer queries are
-    // available, or 0 when the caller should use its CPU-side fallback.
-    double RunDraw(int iterations);
+    // Outcome of one RunDraw(): both clocks, so the caller can cross-check
+    // them (see GpuTestRunner::Calibrate), plus whether OpenGL reported an error.
+    struct DrawTiming {
+        bool ok = true;           // false if OpenGL reported an error (details in `error`)
+        double gpuSeconds = 0.0;  // GL timer-query time; 0 if no timer query is available
+        double wallSeconds = 0.0; // CPU-side time from submission until the GPU finished
+        std::string error;
+    };
+
+    // Runs one timed chunk of work and blocks until the GPU has finished it.
+    // For the ALU and texture workloads `iterations` is the shader loop
+    // count of a single full-target draw; for the fill-rate workload it is
+    // the number of full-target draws issued back to back (a single draw
+    // of a trivial shader is too short to time meaningfully).
+    DrawTiming RunDraw(int iterations);
     bool HasGpuTimer() const { return m_query != 0; }
 
     int Width() const { return m_width; }

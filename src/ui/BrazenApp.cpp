@@ -55,8 +55,20 @@ const char* kGpuResolutionLabels[] = {"256 x 256 (fastest)", "512 x 512 (default
 constexpr int kSsdTestSizesMB[] = {512, 1024, 2048, 4096};
 const char* kSsdTestSizeLabels[] = {"512 MB", "1 GB (default)", "2 GB", "4 GB"};
 constexpr unsigned kMaxDiskBenchmarkThreads = 4;
-// Always leave at least this much free on the drive being tested.
-constexpr unsigned long long kDiskFreeSpaceReserve = 512ull * 1024ull * 1024ull;
+// Always leave at least this much free on the drive being tested (the
+// disk test enforces the same figure again when it starts).
+constexpr unsigned long long kDiskFreeSpaceReserve = DiskIoTest::kFreeSpaceReserveBytes;
+// The RAM test may use at most this share of the memory that is free
+// (or of installed memory when free memory can't be determined).
+constexpr double kRamBudgetShareOfAvailable = 0.60;
+constexpr double kRamBudgetShareOfInstalled = 0.50;
+
+// Worker threads for a "use every core" run: the cores this process may
+// really use (can be fewer than the machine has in a container or under
+// taskset), never fewer than one.
+unsigned UsableCoreCount() {
+    return std::max<unsigned>(1u, static_cast<unsigned>(AllowedCores().size()));
+}
 
 const char* CategoryModeLabel(CategoryRunMode mode) {
     switch (mode) {
@@ -216,7 +228,11 @@ float BrazenApp::AutoButtonWidth(const char* label, float minWidth) const {
 void BrazenApp::AddExternalResult(const BenchmarkResult& result) {
     // GPU runs don't go through BenchmarkManager (which logs its own
     // results), so their outcome is logged here.
-    if (result.cancelled) {
+    if (result.failed) {
+        // already logged as an error by GpuTestRunner::FailRun / the zero-data check
+        if (result.notes.find("without producing any timing data") != std::string::npos)
+            LogError("GPU", "%s failed: %s", result.testName.c_str(), result.notes.c_str());
+    } else if (result.cancelled) {
         LogInfo("GPU", "%s cancelled after %.1f s.", result.testName.c_str(), result.elapsedSeconds);
     } else {
         LogInfo("GPU", "%s finished in %.1f s: %.2f %s", result.testName.c_str(), result.elapsedSeconds,
@@ -596,29 +612,32 @@ void BrazenApp::DrawRamBenchmarkTab() {
     ImGui::SetNextItemWidth(240);
     ImGui::Combo("##ramsize", &m_ramSettings.bufferSizeIndex, kRamBufferSizeLabels,
                   static_cast<int>(sizeof(kRamBufferSizeLabels) / sizeof(kRamBufferSizeLabels[0])));
-    unsigned estimatedThreads = m_ramSettings.autoThreadCount
-        ? std::max(1u, m_hardwareInfo.logicalCores)
-        : static_cast<unsigned>(std::max(1, m_ramSettings.threadCountOverride));
-    uint64_t estimatedBytes = static_cast<uint64_t>(kRamBufferSizesMB[m_ramSettings.bufferSizeIndex]) *
-                              1024ull * 1024ull * 2ull * estimatedThreads;
-    ImGui::TextDisabled("Estimated multi-core allocation: %s (%u thread%s)",
-                        FormatBytesAsGB(estimatedBytes).c_str(), estimatedThreads,
-                        estimatedThreads == 1 ? "" : "s");
-    if (m_hardwareInfo.totalRamBytes > 0 && estimatedBytes > m_hardwareInfo.totalRamBytes / 2) {
-        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
-                           "This setting uses more than half of installed RAM.");
+    uint64_t requiredBytes = RamRequiredBytes();
+    unsigned plannedThreads = RamPlannedThreads();
+    ImGui::TextDisabled("Memory this run will allocate: %s (%u thread%s, 2 buffers each)",
+                        FormatBytesAsGB(requiredBytes).c_str(), plannedThreads, plannedThreads == 1 ? "" : "s");
+    {
+        unsigned long long budget = RamBudgetBytes();
+        unsigned long long available = detail::QueryAvailableRamBytes();
+        if (available > 0)
+            ImGui::TextDisabled("Free memory right now: %s (the test may use up to %s of it)",
+                                FormatBytesAsGB(available).c_str(), FormatBytesAsGB(budget).c_str());
+        else if (budget > 0)
+            ImGui::TextDisabled("Free memory can't be measured here; the test may use up to %s (half of installed RAM).",
+                                FormatBytesAsGB(budget).c_str());
     }
 
     ImGui::Spacing();
     ImGui::Text("Threads");
     if (DrawHelpButton("ram_threads"))
         ImGui::TextWrapped(
-            "Auto uses every logical core for the multi-core run. "
+            "Auto uses every logical core this app is allowed to use "
+            "for the multi-core run. "
             "Override it to deliberately test with fewer threads.");
     ImGui::Checkbox("Use all cores (auto)", &m_ramSettings.autoThreadCount);
     if (!m_ramSettings.autoThreadCount) {
         ImGui::SetNextItemWidth(240);
-        int maxThreads = std::max(1, static_cast<int>(m_hardwareInfo.logicalCores));
+        int maxThreads = static_cast<int>(UsableCoreCount());
         m_ramSettings.threadCountOverride = std::min(m_ramSettings.threadCountOverride, maxThreads);
         ImGui::SliderInt("##ramthreads", &m_ramSettings.threadCountOverride, 1, maxThreads);
     }
@@ -653,11 +672,54 @@ void BrazenApp::DrawRamBenchmarkTab() {
     if (ImGui::Button("Reset Defaults", ImVec2(AutoButtonWidth("Reset Defaults", 140.0f), 0)))
         m_ramSettings = RamSettings{};
     ImGui::SameLine();
+    std::string ramWhyNot;
+    const bool canStartRam = CanStartRam(&ramWhyNot);
+    if (!canStartRam) ImGui::BeginDisabled();
     if (ImGui::Button("Run Benchmark", ImVec2(AutoButtonWidth("Run Benchmark", 150.0f), 0)))
         StartRamBenchmark();
+    if (!canStartRam) ImGui::EndDisabled();
+    if (!canStartRam) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "(%s)", ramWhyNot.c_str());
+    }
+}
+
+unsigned BrazenApp::RamPlannedThreads() const {
+    if (m_ramSettings.mode == CategoryRunMode::SingleCoreOnly) return 1;
+    return m_ramSettings.autoThreadCount ? UsableCoreCount()
+                                         : static_cast<unsigned>(std::max(1, m_ramSettings.threadCountOverride));
+}
+
+unsigned long long BrazenApp::RamRequiredBytes() const {
+    return static_cast<unsigned long long>(kRamBufferSizesMB[m_ramSettings.bufferSizeIndex]) * 1024ull * 1024ull *
+           2ull * RamPlannedThreads();
+}
+
+unsigned long long BrazenApp::RamBudgetBytes() const {
+    unsigned long long available = detail::QueryAvailableRamBytes();
+    if (available > 0) return static_cast<unsigned long long>(static_cast<double>(available) * kRamBudgetShareOfAvailable);
+    if (m_hardwareInfo.totalRamBytes > 0)
+        return static_cast<unsigned long long>(static_cast<double>(m_hardwareInfo.totalRamBytes) * kRamBudgetShareOfInstalled);
+    return 0;
+}
+
+bool BrazenApp::CanStartRam(std::string* whyNot) const {
+    unsigned long long budget = RamBudgetBytes();
+    if (budget > 0 && RamRequiredBytes() > budget) {
+        if (whyNot)
+            *whyNot = "needs " + FormatBytesAsGB(RamRequiredBytes()) + " but only about " +
+                      FormatBytesAsGB(budget) + " is safe to use; pick a smaller buffer, fewer threads or close other programs";
+        return false;
+    }
+    return true;
 }
 
 void BrazenApp::StartRamBenchmark() {
+    std::string why;
+    if (!CanStartRam(&why)) {
+        LogWarn("RAM", "RAM benchmark not started: %s.", why.c_str());
+        return;
+    }
     size_t bufferBytes = static_cast<size_t>(kRamBufferSizesMB[m_ramSettings.bufferSizeIndex]) * 1024ull * 1024ull;
     unsigned threadOverride = m_ramSettings.autoThreadCount ? 0u
                                                              : static_cast<unsigned>(m_ramSettings.threadCountOverride);
@@ -837,7 +899,7 @@ unsigned long long BrazenApp::SsdRequiredBytes() const {
                               1024ull * 1024ull;
     unsigned threads = m_ssdSettings.mode == CategoryRunMode::SingleCoreOnly
         ? 1u
-        : std::min(kMaxDiskBenchmarkThreads, std::max(1u, m_hardwareInfo.logicalCores));
+        : std::min(kMaxDiskBenchmarkThreads, UsableCoreCount());
     // Jobs run one after another and each job's files are deleted when it
     // ends, so the peak is the largest single job: a multi-core write
     // makes one file per worker, a read shares a single file.
@@ -871,7 +933,7 @@ void BrazenApp::StartSsdBenchmark() {
     const auto& drive = m_allDrives[static_cast<size_t>(m_ssdSettings.selectedDriveIndex)];
     uint64_t totalBytes = static_cast<uint64_t>(kSsdTestSizesMB[m_ssdSettings.testSizeIndex]) * 1024ull * 1024ull;
     std::filesystem::path targetDir(drive.path);
-    const unsigned workers = std::min(kMaxDiskBenchmarkThreads, std::max(1u, m_hardwareInfo.logicalCores));
+    const unsigned workers = std::min(kMaxDiskBenchmarkThreads, UsableCoreCount());
 
     // Write and Read are enqueued as separate DiskIoTest instances (see
     // DiskIoMode) so they show up as two distinct results rather than
@@ -1046,7 +1108,7 @@ void BrazenApp::DrawSsdBenchmarkTab() {
                 "behavior rather than a drive's simple single-request speed. "
                 "Multi-Core results should not be compared directly with "
                 "Single-Core results or used as a SATA link-speed reading.");
-            unsigned plannedThreads = std::min(kMaxDiskBenchmarkThreads, std::max(1u, m_hardwareInfo.logicalCores));
+            unsigned plannedThreads = std::min(kMaxDiskBenchmarkThreads, UsableCoreCount());
             ImGui::TextDisabled("Multi-Core uses up to %u workers, each with its own %s test file.",
                                 plannedThreads, kSsdTestSizeLabels[m_ssdSettings.testSizeIndex]);
         }
@@ -1936,10 +1998,11 @@ void BrazenApp::DrawAppInfoView() {
         "write/read-back, and reports throughput scores you can "
         "compare against this machine over time, or against another "
         "machine running the same tests.\n\n"
-        "CPU, RAM, and Disk tests can each be run single-core, "
-        "multi-core, or both, with a configurable duration and, for "
-        "RAM and Disk, a configurable buffer/chunk size. The Disk tab "
-        "lets you pick which detected drive to target. GPUs and drives "
+        "CPU and RAM tests can each be run single-core, multi-core, or "
+        "both, with a configurable duration; RAM also has a configurable "
+        "buffer size. The Disk test instead moves a fixed amount of data "
+        "(you choose how much, and which detected drive to use) and runs "
+        "until it is done, so it has no duration. GPUs and drives "
         "are both fully enumerated in System Info; GPU selection is "
         "shown too, though only the GPU actually driving this window "
         "can be benchmarked. See the '?' on the GPU tab for why.\n\n"
@@ -1951,10 +2014,11 @@ void BrazenApp::DrawAppInfoView() {
         "The Results view keeps a history of every run for the current "
         "session, nothing is written to disk between launches, "
         "with a detail view and delete for individual results, plus a "
-        "way to clear everything at once. The Log view mirrors what "
-        "each benchmark reports as it happens, and System Info shows "
-        "what Brazen was able to detect about the machine it's running "
-        "on.");
+        "way to clear everything at once. The Log & Console view "
+        "records what the app is doing as it happens (hardware "
+        "detection, every run, warnings and errors) and accepts typed "
+        "commands, and System Info shows what Brazen was able to "
+        "detect about the machine it's running on.");
     ImGui::Spacing();
     if (ImGui::Button("View Rankings", ImVec2(AutoButtonWidth("View Rankings", 180.0f), 0)))
         ImGui::OpenPopup("Cat Rank Table##CatRankTable");

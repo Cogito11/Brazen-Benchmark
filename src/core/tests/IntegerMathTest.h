@@ -34,6 +34,10 @@ public:
         return std::make_unique<IntegerMathTest>(*this);
     }
 
+    // Verification hook: the loop's running state. Identical instances must
+    // evolve identically (the work is deterministic).
+    uint64_t State() const { return m_state; }
+
 private:
     uint64_t m_state = 88172645463325252ull;
 };

@@ -17,6 +17,8 @@ score.
 - [Included tests](#included-tests)
 - [The disk test in detail](#the-disk-test-in-detail)
 - [Scoring](#scoring)
+- [Reliability and safety](#reliability-and-safety)
+- [Tests](#tests)
 - [Building](#building)
 - [Continuous integration and releases](#continuous-integration-and-releases)
 - [Architecture](#architecture)
@@ -50,7 +52,9 @@ a long RAM run don't overwrite each other.
   Multi-Core / Both mode, and a duration per test (1-30 s, default 8 s).
 - **RAM**: buffer size (8 / 16 / 32 / 64 / 128 MB; larger buffers better
   defeat big L3 caches), an automatic or manual thread count, mode, and
-  duration (1-30 s).
+  duration (1-30 s). The tab shows how much memory the run will allocate
+  and how much is free; a run that wouldn't fit is refused (see
+  [Reliability and safety](#reliability-and-safety)).
 - **GPU**: workload checkboxes (ALU, texture, fill rate), render
   resolution (256 up to 2048 square) and duration per workload (1-30 s).
   There is no mode selector, because GPU work has no single/multi-core
@@ -167,8 +171,12 @@ The disk test is deliberately simple and predictable.
   table and detail view) instead of silently scoring 0. Failed and
   cancelled results never feed any score.
 - **Cleanup.** Temporary files (`brazen_disktest_*.tmp`) are deleted when
-  a run finishes, is cancelled or fails. Before starting, Brazen checks
-  that the drive has room for the files plus a 512 MB reserve.
+  a run finishes, is cancelled or fails. If an earlier run crashed or lost
+  power and left files behind, the next disk run removes those older than
+  15 minutes (never a more recent file, in case another Brazen is working
+  in the same folder). Free space is checked when the run is queued and
+  again when the test starts, always leaving a 512 MB reserve, and a
+  single file is capped at 1 TB.
 - **Multi-Core** (Advanced): one temporary file per worker, up to 4
   workers. It measures concurrent I/O behavior, not a drive's simple
   single-stream speed, so don't compare it directly with Single-Core
@@ -195,6 +203,93 @@ random-I/O tool like fio or CrystalDiskMark.
   different units and are shown separately. GPU, RAM and Disk results
   never affect the composite CPU score.
 - Cancelled and failed runs are excluded from all scores.
+
+## Reliability and safety
+
+Benchmarks push the machine hard, so the engine is built to fail cleanly
+and to measure what it claims to measure. These guarantees are enforced by
+the self-test suite (see [Tests](#tests)).
+
+**The app doesn't go down with a test.**
+- An exception from any test (out of memory above all) becomes a *Failed*
+  result with the reason, in the log, Results table and detail view, never
+  a crash. The same applies if a worker thread can't be started.
+- A run that finishes without doing any work is reported as failed rather
+  than as a plausible-looking zero score.
+- The RAM test is refused up front if its buffers (two per thread) wouldn't
+  fit in about 60 % of the *currently free* memory (50 % of installed RAM if
+  free memory can't be measured). On Linux free memory honors container
+  (cgroup) limits. This matters because exceeding free memory doesn't
+  produce a clean error: Linux over-commits and then the OOM killer ends
+  the process; Windows pages until the machine crawls.
+- The disk test re-checks free space when it starts, caps its file size,
+  and cleans up leftovers (see above).
+- The GPU test ramps up from tiny draws instead of starting with a large
+  one, abandons the run if a single draw approaches the driver watchdog
+  limit (Windows resets a GPU busy for about 2 s), and treats any OpenGL
+  error as a failure, since a failed draw "completes" instantly and would
+  otherwise be scored as an absurdly fast GPU.
+
+**Measurements are valid.**
+- Every worker thread finishes `Setup()` before any starts timing, so all
+  threads are measured over the same window. Otherwise early threads run
+  alone for a while and inflate aggregate numbers such as RAM bandwidth.
+- Threads are pinned only to cores the process may actually use
+  (containers, `taskset`, `start /affinity`), and a "use every core" run
+  starts one thread per *allowed* core. On Windows with more than 64
+  logical processors, cores are addressed through processor groups.
+- A run is marked *cancelled* only if a worker actually saw the cancel
+  request, not merely because Cancel was clicked just after it finished.
+- Nonsensical durations (NaN, negative, huge) are clamped.
+- The GPU test cross-checks the driver's timer query against wall-clock
+  time. Some drivers (software rasterizers, for instance) report a small
+  fraction of the real time, which inflated scores by roughly 65x in
+  testing; when they disagree, wall-clock timing is used and the log says
+  so. The fill-rate workload issues many full-target draws per timed chunk
+  instead of timing a single microsecond-long draw.
+- Each CPU/RAM test exposes a read-only verification hook so the tests can
+  check that the arithmetic is right (exactly 148,933 primes below two
+  million, hashes matching an independent FNV-1a implementation, sorted
+  output, identical state between identical instances, copies leaving both
+  buffers equal).
+
+**Known limits.** Hashing reports MiB/s but labels it MB/s, while RAM and
+disk report decimal MB/s; this is kept because the score baseline was
+measured that way and changing it would shift every Hashing score. macOS
+has no hard thread pinning (only an affinity tag) and no available-memory
+reading, so it falls back to a share of installed RAM.
+
+## Tests
+
+The engine has a dependency-free regression suite
+([`tests/SelfTest.cpp`](tests/SelfTest.cpp), no GUI or OpenGL needed):
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target BrazenSelfTest
+ctest --test-dir build --output-on-failure   # about 5 seconds
+build/BrazenSelfTest --list                  # or run named tests directly
+```
+
+It covers the runner (exceptions, start gating, cancellation, durations),
+the manager (job bookkeeping, shutdown, concurrent enqueue/cancel), the
+registry, thread affinity, each CPU/RAM test's correctness, and the disk
+test (round trip, bad paths, low space, cancellation, leftover cleanup).
+Tests that need something the machine can't provide, such as several GB of
+free disk, are reported as skipped, not failed.
+
+To run it under the sanitizers (GCC/Clang):
+
+```bash
+cmake -S . -B build-asan -DBRAZEN_SANITIZE=address,undefined && cmake --build build-asan --target BrazenSelfTest
+cmake -S . -B build-tsan -DBRAZEN_SANITIZE=thread            && cmake --build build-tsan --target BrazenSelfTest
+ctest --test-dir build-asan --output-on-failure
+ctest --test-dir build-tsan --output-on-failure
+```
+
+GPU behavior needs an OpenGL context and isn't part of this suite; it is
+exercised by running the app (or any GL 3.3 context, including a software
+renderer under Xvfb).
 
 ## Building
 
@@ -224,11 +319,13 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j
 ```
 
-This produces two executables:
+This produces three executables:
 
 - **`Brazen`**: the GUI application (`build/Brazen.exe` on Windows). On
   Windows it is linked as a GUI-subsystem program, so launching it does
   not open a console window.
+- **`BrazenSelfTest`**: the regression suite described under
+  [Tests](#tests); disable with `-DBRAZEN_BUILD_TESTS=OFF`.
 - **`BrazenCoreTest`**: a small headless console runner that executes
   every CPU/RAM test once. It has no GUI or OpenGL dependency, so it is
   useful for CI and for machines without a display or GPU. GPU and disk
@@ -264,6 +361,11 @@ tag without the leading `v`, rolling builds use an identifier such as
   artifacts (`Brazen-linux-x86_64.tar.gz`, `Brazen-windows-x86_64.zip`,
   `Brazen-macos-arm64.tar.gz`). It is not triggered directly.
 
+- **`.github/workflows/tests.yml`** runs the self-test suite on every push
+  and pull request: normally on Linux, Windows and macOS, and on Linux
+  under AddressSanitizer + UndefinedBehaviorSanitizer and under
+  ThreadSanitizer.
+
 To cut a release:
 
 ```bash
@@ -284,7 +386,7 @@ src/
     BenchmarkManager.h      Background worker + job queue; bridges the
                             runner to the UI thread and reports progress
     Log.h                   Thread-safe application logger (see below)
-    ThreadAffinity.h        Cross-platform "pin this thread to core N"
+    ThreadAffinity.h        Allowed-core detection + cross-platform thread pinning
     HardwareInfo.h          CPU/RAM/OS/GPU/drive detection
     ScoreCalculator.h       Composite CPU score + cat-tier ranking
     RegisterTests.h         Registers the built-in CPU/RAM tests
@@ -305,6 +407,9 @@ src/
                             benchmark tabs, log, console and its commands
   main.cpp                  GLFW + OpenGL bootstrap and the render loop
   core_test_main.cpp        Headless console entry point (CPU/RAM only)
+tests/
+  SelfTest.h                Tiny test framework (TEST_CASE / CHECK / SKIP_UNLESS)
+  SelfTest.cpp              The regression suite (BrazenSelfTest)
 ```
 
 ### Logging
@@ -370,11 +475,14 @@ GPU results never feed the CPU composite.
 
 ### Core affinity
 
-CPU/RAM/disk single-core runs pin to the highest-numbered logical core
-(core 0 usually fields more OS and interrupt traffic); multi-core runs pin
-thread *i* to core *i* (or a chosen subset when a manual RAM thread count
-is used). If the OS rejects a pin request, the result is still recorded,
-flagged "Pinned: No" and logged as a warning. GPU results show "N/A".
+`AllowedCores()` lists the logical CPUs the process may use (Linux
+`sched_getaffinity`, the Windows process affinity mask or processor
+groups). Single-core runs pin to the highest-numbered allowed core (core 0
+usually fields more OS and interrupt traffic); multi-core runs pin thread
+*i* to the *i*-th allowed core (or a chosen subset when a manual RAM thread
+count is used) and default to one thread per allowed core. If the OS
+rejects a pin request, the result is still recorded, flagged "Pinned: No"
+and logged as a warning. GPU results show "N/A".
 
 ## Extending Brazen
 
@@ -396,6 +504,10 @@ target) aren't registered; construct them in the matching
 `BenchmarkManager::Enqueue()`. If a test runs until its work is done
 rather than for a duration, implement the
 [fixed-work hooks](#fixed-work-tests).
+
+When adding a test, also add a case to `tests/SelfTest.cpp` that checks its
+result is *correct* (not just that it runs), and give the class a small
+read-only accessor for whatever state that check needs.
 
 ### Logging from new code
 
