@@ -423,7 +423,14 @@ TEST_CASE(pinning_accepts_allowed_cores_and_rejects_nonsense) {
         okHuge = PinCurrentThreadToCore(0xFFFFFFFFu);
     });
     t.join();
+#if !defined(__APPLE__)
+    // macOS has no hard pinning, and Apple Silicon rejects THREAD_AFFINITY_POLICY
+    // outright (KERN_NOT_SUPPORTED), so a refused pin there is expected. The
+    // runner already reports it as "Pinned: No" rather than failing.
     CHECK(okAllowed);
+#else
+    (void)okAllowed;
+#endif
     CHECK(!okAbsurd);
     CHECK(!okHuge);
 }

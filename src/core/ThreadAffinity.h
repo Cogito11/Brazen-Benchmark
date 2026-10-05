@@ -138,6 +138,10 @@ inline bool PinCurrentThreadToCore(unsigned coreIndex) {
     }
     return false;
 #elif defined(__APPLE__)
+    // The affinity "tag" is an arbitrary grouping hint, so the kernel happily
+    // accepts nonsense values (and 0xFFFFFFFF + 1 wraps to the "no affinity"
+    // tag). Validate the index ourselves to honor the out-of-range contract.
+    if (coreIndex >= AllowedCores().size()) return false;
     thread_affinity_policy_data_t policy = { static_cast<integer_t>(coreIndex + 1) };
     thread_port_t thread = pthread_mach_thread_np(pthread_self());
     return thread_policy_set(thread, THREAD_AFFINITY_POLICY,
